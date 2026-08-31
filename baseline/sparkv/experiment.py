@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import heapq
 import json
 import math
@@ -10,6 +11,7 @@ import re
 import string
 import threading
 import time
+import warnings
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +42,8 @@ def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def middle_truncate(ids: list[int], length: int) -> list[int]:
@@ -88,28 +91,130 @@ def prepare(args: argparse.Namespace) -> None:
     print(json.dumps({"saved": str(out), "samples": len(records)}, indent=2))
 
 
-def load_model(model_id: str):
-    if not torch.cuda.is_available():
-        raise RuntimeError("A CUDA GPU is required.")
-    bf16 = torch.cuda.is_bf16_supported()
-    compute_dtype = torch.bfloat16 if bf16 else torch.float16
-    quant = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=compute_dtype,
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        quantization_config=quant,
-        device_map={"": 0},
-        attn_implementation="sdpa",
-        torch_dtype=compute_dtype,
-    )
+@dataclass(frozen=True)
+class ModelRuntime:
+    device: torch.device
+    dtype: torch.dtype
+    backend: str
+
+    @property
+    def is_cuda(self) -> bool:
+        return self.device.type == "cuda"
+
+
+def cpu_dtype_from_name(name: str) -> torch.dtype:
+    if name == "float32":
+        return torch.float32
+    if name == "bfloat16":
+        return torch.bfloat16
+    raise ValueError(f"Unsupported CPU dtype: {name}")
+
+
+def device_synchronize(runtime: ModelRuntime) -> None:
+    if runtime.is_cuda:
+        torch.cuda.synchronize(runtime.device)
+
+
+def clear_device_cache(runtime: ModelRuntime) -> None:
+    if runtime.is_cuda:
+        torch.cuda.empty_cache()
+
+
+def describe_runtime(runtime: ModelRuntime) -> dict[str, str]:
+    return {
+        "device": str(runtime.device),
+        "dtype": str(runtime.dtype).removeprefix("torch."),
+        "backend": runtime.backend,
+    }
+
+
+def load_model(
+    model_id: str,
+    requested_device: str = "auto",
+    cpu_dtype_name: str = "float32",
+):
+    if requested_device not in {"auto", "cuda", "cpu"}:
+        raise ValueError(f"Unsupported device selection: {requested_device}")
+
+    # Tokenizer/network failures are unrelated to CUDA and must not be hidden by
+    # the CPU fallback path.
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    cuda_error: str | None = None
+
+    if requested_device in {"auto", "cuda"}:
+        if torch.cuda.is_available():
+            try:
+                bf16 = torch.cuda.is_bf16_supported()
+                compute_dtype = torch.bfloat16 if bf16 else torch.float16
+                quant = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_compute_dtype=compute_dtype,
+                )
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_id,
+                    quantization_config=quant,
+                    device_map={"": 0},
+                    attn_implementation="sdpa",
+                    torch_dtype=compute_dtype,
+                    low_cpu_mem_usage=True,
+                )
+                model.eval()
+                model.config.use_cache = True
+                runtime = ModelRuntime(
+                    device=torch.device("cuda:0"),
+                    dtype=compute_dtype,
+                    backend="cuda-nf4",
+                )
+                print(json.dumps({"model_runtime": describe_runtime(runtime)}))
+                return model, tokenizer, runtime
+            except Exception as exc:
+                if requested_device == "cuda":
+                    raise RuntimeError("Strict CUDA model loading failed.") from exc
+                cuda_error = f"{type(exc).__name__}: {exc}"
+                warnings.warn(
+                    "CUDA model loading failed; retrying on CPU without "
+                    f"bitsandbytes quantization. Cause: {cuda_error}",
+                    RuntimeWarning,
+                )
+                gc.collect()
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+        elif requested_device == "cuda":
+            raise RuntimeError(
+                "--device cuda was requested, but torch.cuda.is_available() is False."
+            )
+
+    cpu_dtype = cpu_dtype_from_name(cpu_dtype_name)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            device_map={"": "cpu"},
+            attn_implementation="sdpa",
+            torch_dtype=cpu_dtype,
+            low_cpu_mem_usage=True,
+        )
+    except Exception as cpu_error:
+        if cuda_error is not None:
+            raise RuntimeError(
+                "Both CUDA loading and the CPU fallback failed. "
+                f"CUDA cause: {cuda_error}; "
+                f"CPU cause: {type(cpu_error).__name__}: {cpu_error}"
+            ) from cpu_error
+        raise
+
     model.eval()
     model.config.use_cache = True
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    return model, tokenizer, compute_dtype
+    runtime = ModelRuntime(
+        device=torch.device("cpu"),
+        dtype=cpu_dtype,
+        backend=f"cpu-{cpu_dtype_name}",
+    )
+    print(json.dumps({"model_runtime": describe_runtime(runtime)}))
+    return model, tokenizer, runtime
 
 
 def to_legacy(cache: Any):
@@ -144,12 +249,14 @@ def huffman_payload_bytes(q: torch.Tensor) -> int:
 
 def build_cache(args: argparse.Namespace) -> None:
     records = torch.load(args.prepared, map_location="cpu", weights_only=False)
-    model, _, _ = load_model(args.model)
+    model, _, runtime = load_model(args.model, args.device, args.cpu_dtype)
     root = Path(args.cache_root)
     formats = set(args.formats)
 
     for sample_idx, record in enumerate(records[: args.samples]):
-        ids = torch.tensor(record["prefill_ids"], dtype=torch.long, device="cuda")[None]
+        ids = torch.tensor(
+            record["prefill_ids"], dtype=torch.long, device=runtime.device
+        )[None]
         if ids.shape[1] % args.chunk_size != 0:
             raise ValueError("prefill length must be divisible by chunk_size")
         with torch.inference_mode():
@@ -176,6 +283,7 @@ def build_cache(args: argparse.Namespace) -> None:
                 "num_chunks": num_chunks,
                 "layers": layer_count,
                 "kv_heads": head_count,
+                "runtime": describe_runtime(runtime),
                 "chunks": [],
             }
             for fmt in formats
@@ -240,7 +348,7 @@ def build_cache(args: argparse.Namespace) -> None:
             )
         print(f"built {sample_name}: {num_chunks} chunks")
         del ids, output, legacy
-        torch.cuda.empty_cache()
+        clear_device_cache(runtime)
 
 
 def load_meta(sample_dir: Path) -> dict[str, Any]:
@@ -286,22 +394,27 @@ def effective_bandwidth_mbps(mean_mbps: float, cv: float, rng: np.random.Generat
     return max(1e-3, mean_mbps * factor)
 
 
-def decode_chunk(cpu: dict[str, torch.Tensor], fmt: str, layers: int):
+def decode_chunk(
+    cpu: dict[str, torch.Tensor],
+    fmt: str,
+    layers: int,
+    target_dtype: torch.dtype,
+):
     decoded: dict[str, torch.Tensor] = {}
     if fmt == "raw":
         for layer in range(layers):
-            decoded[f"k_{layer:02d}"] = cpu[f"k_{layer:02d}"]
-            decoded[f"v_{layer:02d}"] = cpu[f"v_{layer:02d}"]
+            decoded[f"k_{layer:02d}"] = cpu[f"k_{layer:02d}"].to(target_dtype)
+            decoded[f"v_{layer:02d}"] = cpu[f"v_{layer:02d}"].to(target_dtype)
         return decoded
     for layer in range(layers):
         qk = cpu[f"qk_{layer:02d}"].float() - 16.0
         qv = cpu[f"qv_{layer:02d}"].float() - 16.0
         decoded[f"k_{layer:02d}"] = (
             qk * cpu[f"sk_{layer:02d}"].float()
-        ).to(torch.bfloat16)
+        ).to(target_dtype)
         decoded[f"v_{layer:02d}"] = (
             qv * cpu[f"sv_{layer:02d}"].float()
-        ).to(torch.bfloat16)
+        ).to(target_dtype)
     return decoded
 
 
@@ -313,7 +426,8 @@ def fetch_one_chunk(
     bandwidth_mbps: float,
     jitter_cv: float,
     rng: np.random.Generator,
-    copy_stream: torch.cuda.Stream,
+    runtime: ModelRuntime,
+    copy_stream: torch.cuda.Stream | None,
 ) -> tuple[dict[str, torch.Tensor], FetchStats]:
     stats = FetchStats()
     begin = time.perf_counter()
@@ -327,18 +441,27 @@ def fetch_one_chunk(
     stats.wire_ms = delay * 1000
 
     begin = time.perf_counter()
-    decoded = decode_chunk(cpu, fmt, int(meta["layers"]))
+    decoded = decode_chunk(cpu, fmt, int(meta["layers"]), runtime.dtype)
     stats.decode_ms = (time.perf_counter() - begin) * 1000
 
-    gpu: dict[str, torch.Tensor] = {}
-    with torch.cuda.stream(copy_stream):
-        for name, tensor in decoded.items():
-            try:
-                tensor = tensor.pin_memory()
-            except RuntimeError:
-                pass
-            gpu[name] = tensor.to("cuda", non_blocking=True)
-    return gpu, stats
+    resident: dict[str, torch.Tensor] = {}
+    if runtime.is_cuda:
+        assert copy_stream is not None
+        with torch.cuda.stream(copy_stream):
+            for name, tensor in decoded.items():
+                try:
+                    tensor = tensor.pin_memory()
+                except RuntimeError:
+                    pass
+                resident[name] = tensor.to(
+                    runtime.device, non_blocking=True
+                )
+        return resident, stats
+
+    # CPU path: no pinning, CUDA stream, or asynchronous device copy.
+    for name, tensor in decoded.items():
+        resident[name] = tensor.to(runtime.device)
+    return resident, stats
 
 
 def append_stats(total: FetchStats, item: FetchStats) -> None:
@@ -354,17 +477,25 @@ def compute_one_chunk(
     chunk_size: int,
     t: int,
     past: Any,
+    runtime: ModelRuntime,
 ):
     start = t * chunk_size
     current = torch.tensor(
-        prefill_ids[start : start + chunk_size], dtype=torch.long, device="cuda"
+        prefill_ids[start : start + chunk_size],
+        dtype=torch.long,
+        device=runtime.device,
     )[None]
     past_len = 0 if past is None else int(past.get_seq_length())
     attention_mask = torch.ones(
-        (1, past_len + current.shape[1]), dtype=torch.long, device="cuda"
+        (1, past_len + current.shape[1]),
+        dtype=torch.long,
+        device=runtime.device,
     )
     cache_position = torch.arange(
-        past_len, past_len + current.shape[1], dtype=torch.long, device="cuda"
+        past_len,
+        past_len + current.shape[1],
+        dtype=torch.long,
+        device=runtime.device,
     )
     with torch.inference_mode():
         output = model(
@@ -403,11 +534,20 @@ def assemble_cache(
     return DynamicCache.from_legacy_cache(tuple(legacy))
 
 
-def first_step(model, seed_id: int, cache: DynamicCache):
+def first_step(
+    model,
+    seed_id: int,
+    cache: DynamicCache,
+    runtime: ModelRuntime,
+):
     past_len = int(cache.get_seq_length())
-    current = torch.tensor([[seed_id]], dtype=torch.long, device="cuda")
-    mask = torch.ones((1, past_len + 1), dtype=torch.long, device="cuda")
-    position = torch.tensor([past_len], dtype=torch.long, device="cuda")
+    current = torch.tensor([[seed_id]], dtype=torch.long, device=runtime.device)
+    mask = torch.ones(
+        (1, past_len + 1), dtype=torch.long, device=runtime.device
+    )
+    position = torch.tensor(
+        [past_len], dtype=torch.long, device=runtime.device
+    )
     with torch.inference_mode():
         output = model(
             input_ids=current,
@@ -422,14 +562,27 @@ def first_step(model, seed_id: int, cache: DynamicCache):
     return token, output.past_key_values
 
 
-def continue_greedy(model, first_token: int, cache: Any, max_new_tokens: int, eos: int):
+def continue_greedy(
+    model,
+    first_token: int,
+    cache: Any,
+    max_new_tokens: int,
+    eos: int,
+    runtime: ModelRuntime,
+):
     generated = [first_token]
     current = first_token
     while len(generated) < max_new_tokens and current != eos:
         past_len = int(cache.get_seq_length())
-        ids = torch.tensor([[current]], dtype=torch.long, device="cuda")
-        mask = torch.ones((1, past_len + 1), dtype=torch.long, device="cuda")
-        position = torch.tensor([past_len], dtype=torch.long, device="cuda")
+        ids = torch.tensor(
+            [[current]], dtype=torch.long, device=runtime.device
+        )
+        mask = torch.ones(
+            (1, past_len + 1), dtype=torch.long, device=runtime.device
+        )
+        position = torch.tensor(
+            [past_len], dtype=torch.long, device=runtime.device
+        )
         with torch.inference_mode():
             output = model(
                 input_ids=ids,
@@ -447,14 +600,17 @@ def continue_greedy(model, first_token: int, cache: Any, max_new_tokens: int, eo
 
 
 class PowerSampler:
-    def __init__(self, period: float = 0.02):
+    def __init__(self, period: float = 0.02, enabled: bool = True):
         self.period = period
+        self.enabled = enabled
         self.samples: list[tuple[float, float]] = []
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.handle = None
 
     def start(self) -> None:
+        if not self.enabled:
+            return
         try:
             import pynvml
 
@@ -518,6 +674,7 @@ def qa_f1(prediction: str, answers: list[str]) -> float:
 def run_request(
     model,
     tokenizer,
+    runtime: ModelRuntime,
     record: dict[str, Any],
     sample_dir: Path,
     fmt: str,
@@ -536,7 +693,7 @@ def run_request(
     fetch_error: list[BaseException] = []
     local_cache = None
     local_chunks = 0
-    copy_stream = torch.cuda.Stream()
+    copy_stream = torch.cuda.Stream() if runtime.is_cuda else None
     rng = np.random.default_rng(rng_seed)
 
     state = MeetingState(chunks) if strategy == "adaptive" else None
@@ -553,7 +710,8 @@ def run_request(
     def fetch_worker() -> None:
         nonlocal fetch_total
         try:
-            torch.cuda.set_device(0)
+            if runtime.is_cuda:
+                torch.cuda.set_device(runtime.device)
             if strategy == "adaptive":
                 assert state is not None
                 getter: Callable[[], int | None] = state.claim_fetch
@@ -564,7 +722,7 @@ def run_request(
                 t = getter()
                 if t is None:
                     break
-                gpu, stats = fetch_one_chunk(
+                resident, stats = fetch_one_chunk(
                     sample_dir,
                     meta,
                     fmt,
@@ -572,17 +730,20 @@ def run_request(
                     bandwidth_mbps,
                     jitter_cv,
                     rng,
+                    runtime,
                     copy_stream,
                 )
-                fetched[t] = gpu
+                fetched[t] = resident
                 append_stats(fetch_total, stats)
-            copy_stream.synchronize()
+            if copy_stream is not None:
+                copy_stream.synchronize()
         except BaseException as exc:
             fetch_error.append(exc)
 
-    torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
-    power = PowerSampler()
+    device_synchronize(runtime)
+    if runtime.is_cuda:
+        torch.cuda.reset_peak_memory_stats(runtime.device)
+    power = PowerSampler(enabled=runtime.is_cuda)
     power.start()
     request_start = time.perf_counter()
 
@@ -598,13 +759,23 @@ def run_request(
             if t is None:
                 break
             local_cache = compute_one_chunk(
-                model, record["prefill_ids"], chunk_size, t, local_cache
+                model,
+                record["prefill_ids"],
+                chunk_size,
+                t,
+                local_cache,
+                runtime,
             )
             local_chunks += 1
     else:
         for t in range(split):
             local_cache = compute_one_chunk(
-                model, record["prefill_ids"], chunk_size, t, local_cache
+                model,
+                record["prefill_ids"],
+                chunk_size,
+                t,
+                local_cache,
+                runtime,
             )
             local_chunks += 1
 
@@ -614,8 +785,10 @@ def run_request(
         raise fetch_error[0]
 
     context_cache = assemble_cache(local_cache, local_chunks, fetched, meta)
-    first, decode_cache = first_step(model, int(record["seed_id"]), context_cache)
-    torch.cuda.synchronize()
+    first, decode_cache = first_step(
+        model, int(record["seed_id"]), context_cache, runtime
+    )
+    device_synchronize(runtime)
     ttft_ms = (time.perf_counter() - request_start) * 1000
     ttft_energy_j = power.stop()
 
@@ -625,6 +798,7 @@ def run_request(
         decode_cache,
         max_new_tokens=max(1, quality_tokens),
         eos=tokenizer.eos_token_id,
+        runtime=runtime,
     )
     prediction = tokenizer.decode(generated, skip_special_tokens=True).strip()
     return {
@@ -638,8 +812,15 @@ def run_request(
         "disk_ms": fetch_total.disk_ms,
         "wire_ms": fetch_total.wire_ms,
         "decode_ms": fetch_total.decode_ms,
-        "peak_vram_mib": torch.cuda.max_memory_allocated() / 2**20,
+        "peak_vram_mib": (
+            torch.cuda.max_memory_allocated(runtime.device) / 2**20
+            if runtime.is_cuda
+            else 0.0
+        ),
         "rss_mib": psutil.Process().memory_info().rss / 2**20,
+        "runtime_device": str(runtime.device),
+        "runtime_dtype": str(runtime.dtype).removeprefix("torch."),
+        "runtime_backend": runtime.backend,
         "prediction": prediction,
         "f1": qa_f1(prediction, record["answers"]),
     }
@@ -647,15 +828,19 @@ def run_request(
 
 def run(args: argparse.Namespace) -> None:
     records = torch.load(args.prepared, map_location="cpu", weights_only=False)
-    model, tokenizer, _ = load_model(args.model)
+    model, tokenizer, runtime = load_model(
+        args.model, args.device, args.cpu_dtype
+    )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
     # Kernel/model warm-up; this is intentionally outside TTFT.
-    warm = torch.tensor([[1, 2, 3, 4]], dtype=torch.long, device="cuda")
+    warm = torch.tensor(
+        [[1, 2, 3, 4]], dtype=torch.long, device=runtime.device
+    )
     with torch.inference_mode():
         model(input_ids=warm, use_cache=True, logits_to_keep=1)
-    torch.cuda.synchronize()
+    device_synchronize(runtime)
 
     with output.open("w", encoding="utf-8") as handle:
         for sample_idx, record in enumerate(records[: args.samples]):
@@ -665,6 +850,7 @@ def run(args: argparse.Namespace) -> None:
                     result = run_request(
                         model=model,
                         tokenizer=tokenizer,
+                        runtime=runtime,
                         record=record,
                         sample_dir=sample_dir,
                         fmt=args.format,
@@ -687,27 +873,54 @@ def run(args: argparse.Namespace) -> None:
                     handle.write(json.dumps(result, ensure_ascii=False) + "\n")
                     handle.flush()
                     print(json.dumps(result, ensure_ascii=False))
-                    torch.cuda.empty_cache()
+                    clear_device_cache(runtime)
 
 
 def profile(args: argparse.Namespace) -> None:
     records = torch.load(args.prepared, map_location="cpu", weights_only=False)
-    model, _, _ = load_model(args.model)
+    model, _, runtime = load_model(args.model, args.device, args.cpu_dtype)
     layers = list(model.model.layers)
-    starts = [torch.cuda.Event(enable_timing=True) for _ in layers]
-    ends = [torch.cuda.Event(enable_timing=True) for _ in layers]
     handles = []
-    for layer_idx, layer in enumerate(layers):
-        handles.append(
-            layer.register_forward_pre_hook(
-                lambda _m, _a, idx=layer_idx: starts[idx].record()
+
+    if runtime.is_cuda:
+        starts = [torch.cuda.Event(enable_timing=True) for _ in layers]
+        ends = [torch.cuda.Event(enable_timing=True) for _ in layers]
+        for layer_idx, layer in enumerate(layers):
+            handles.append(
+                layer.register_forward_pre_hook(
+                    lambda _m, _a, idx=layer_idx: starts[idx].record()
+                )
             )
-        )
-        handles.append(
-            layer.register_forward_hook(
-                lambda _m, _a, _o, idx=layer_idx: ends[idx].record()
+            handles.append(
+                layer.register_forward_hook(
+                    lambda _m, _a, _o, idx=layer_idx: ends[idx].record()
+                )
             )
-        )
+    else:
+        cpu_starts = [0.0 for _ in layers]
+        cpu_elapsed_ms = [0.0 for _ in layers]
+
+        def make_cpu_pre_hook(index: int):
+            def hook(_module, _args):
+                cpu_starts[index] = time.perf_counter()
+
+            return hook
+
+        def make_cpu_post_hook(index: int):
+            def hook(_module, _args, _output):
+                cpu_elapsed_ms[index] = (
+                    time.perf_counter() - cpu_starts[index]
+                ) * 1000.0
+
+            return hook
+
+        for layer_idx, layer in enumerate(layers):
+            handles.append(
+                layer.register_forward_pre_hook(make_cpu_pre_hook(layer_idx))
+            )
+            handles.append(
+                layer.register_forward_hook(make_cpu_post_hook(layer_idx))
+            )
 
     all_samples = []
     try:
@@ -717,13 +930,26 @@ def profile(args: argparse.Namespace) -> None:
             chunks = len(record["prefill_ids"]) // args.chunk_size
             for t in range(chunks):
                 past = compute_one_chunk(
-                    model, record["prefill_ids"], args.chunk_size, t, past
+                    model,
+                    record["prefill_ids"],
+                    args.chunk_size,
+                    t,
+                    past,
+                    runtime,
                 )
-                torch.cuda.synchronize()
-                sample.append([starts[l].elapsed_time(ends[l]) for l in range(len(layers))])
+                device_synchronize(runtime)
+                if runtime.is_cuda:
+                    sample.append(
+                        [
+                            starts[layer].elapsed_time(ends[layer])
+                            for layer in range(len(layers))
+                        ]
+                    )
+                else:
+                    sample.append(list(cpu_elapsed_ms))
             all_samples.append(sample)
             del past
-            torch.cuda.empty_cache()
+            clear_device_cache(runtime)
     finally:
         for handle in handles:
             handle.remove()
@@ -733,10 +959,31 @@ def profile(args: argparse.Namespace) -> None:
         "model": args.model,
         "chunk_size": args.chunk_size,
         "samples": len(all_samples),
+        "runtime": describe_runtime(runtime),
         "token_layer_ms_median": np.median(costs, axis=0).tolist(),
     }
-    Path(args.output).write_text(json.dumps(result, indent=2), encoding="utf-8")
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps({"saved": args.output, "shape": list(costs.shape)}, indent=2))
+
+
+def add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help=(
+            "auto: try CUDA NF4 and fall back to CPU; "
+            "cuda: require CUDA; cpu: force CPU"
+        ),
+    )
+    parser.add_argument(
+        "--cpu-dtype",
+        choices=["float32", "bfloat16"],
+        default="float32",
+        help="dtype used only by the CPU model path",
+    )
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -757,6 +1004,7 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--formats", nargs="+", choices=["raw", "q5"], default=["raw", "q5"])
     p.add_argument("--samples", type=int, default=100)
     p.add_argument("--chunk-size", type=int, default=1024)
+    add_runtime_arguments(p)
     p.set_defaults(func=build_cache)
 
     p = sub.add_parser("profile")
@@ -765,6 +1013,7 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--samples", type=int, default=5)
     p.add_argument("--chunk-size", type=int, default=1024)
     p.add_argument("--output", required=True)
+    add_runtime_arguments(p)
     p.set_defaults(func=profile)
 
     p = sub.add_parser("run")
@@ -786,6 +1035,7 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--quality-tokens", type=int, default=32)
     p.add_argument("--seed", type=int, default=2026)
     p.add_argument("--output", required=True)
+    add_runtime_arguments(p)
     p.set_defaults(func=run)
     return parser
 
