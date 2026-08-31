@@ -1,3 +1,0 @@
-/var/spool/slurm/d/job138533/slurm_script: line 19: ${SAMP${PROMPT_TOKENS:-8193}"
-readonly CHUNK_SIZE="${CHLES:-1}"
-readonly PROMPT_TOKENS="UNK_SIZE:-1024}: bad substitution

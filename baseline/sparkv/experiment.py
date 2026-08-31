@@ -56,9 +56,13 @@ def middle_truncate(ids: list[int], length: int) -> list[int]:
 def prepare(args: argparse.Namespace) -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     try:
-        dataset = load_dataset("THUDM/LongBench", "triviaqa", split="test")
-    except Exception:
-        dataset = load_dataset("zai-org/LongBench", "triviaqa", split="test")
+        dataset = load_dataset("THUDM/LongBench", "triviaqa", split="test", trust_remote_code=True,)
+    except Exception as exc:
+        warnings.warn(
+            "THUDM/LongBench 로드에 실패했습니다."
+            f"zai-org/LonBench로 재시도를 진행합니다. 원인: {type{exc}.__name__}: {exc}"
+        )
+        dataset = load_dataset("zai-org/LongBench", "triviaqa", split="test", trust_remote_code=True,)
 
     records: list[dict[str, Any]] = []
     for row_idx, row in enumerate(dataset):

@@ -1,0 +1,3 @@
+Required package is unavailable: transformers: No package metadata was found for transformers
+[ERROR] line=172 exit_code=1
+[ERROR] Temporary files are preserved at: /local_datasets/surt321/sparkv-test/138535

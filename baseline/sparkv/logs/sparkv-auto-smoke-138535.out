@@ -1,0 +1,20 @@
+utc_start=2026-08-31T17:24:19Z
+job_id=138535
+hostname=moana-r1
+repo_root=/data/surt321/repos/lab/kv_cache
+branch=exp/sparkv-test
+commit=f08ac8ab4e465d8c9919f86bfc909ed5b8a4709e
+python=/data/surt321/anaconda3/envs/lab/bin/python
+conda_env=lab
+model=Qwen/Qwen3-4B
+samples=1
+prompt_tokens=8193
+chunk_size=1024
+repeats=1
+quality_tokens=16
+bandwidth_mbps=640
+jitter_cv=0.0
+split=4
+seed=2026
+NVIDIA GeForce RTX 3090, 24576 MiB, 535.161.07
+[INFO] Temporary files preserved at: /local_datasets/surt321/sparkv-test/138535

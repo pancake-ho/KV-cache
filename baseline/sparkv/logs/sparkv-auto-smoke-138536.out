@@ -1,0 +1,50 @@
+utc_start=2026-08-31T17:28:47Z
+job_id=138536
+hostname=moana-r1
+repo_root=/data/surt321/repos/lab/kv_cache
+branch=exp/sparkv-test
+commit=f08ac8ab4e465d8c9919f86bfc909ed5b8a4709e
+python=/data/surt321/anaconda3/envs/lab/bin/python
+conda_env=lab
+model=Qwen/Qwen3-4B
+samples=1
+prompt_tokens=8193
+chunk_size=1024
+repeats=1
+quality_tokens=16
+bandwidth_mbps=640
+jitter_cv=0.0
+split=4
+seed=2026
+NVIDIA GeForce RTX 3090, 24576 MiB, 535.161.07
+{
+  "packages": {
+    "torch": "2.4.1+cu121",
+    "transformers": "4.51.3",
+    "accelerate": "1.6.0",
+    "bitsandbytes": "0.45.5",
+    "datasets": "3.6.0",
+    "safetensors": "0.5.3",
+    "numpy": "2.1.3",
+    "pandas": "2.2.3",
+    "psutil": "7.0.0",
+    "nvidia-ml-py": "12.570.86",
+    "pytest": "8.3.5"
+  },
+  "cuda_available": true,
+  "cuda_version": "12.1",
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "gpu_count": 1,
+  "bf16_supported": true
+}
+No broken requirements found.
+........                                                                 [100%]
+8 passed in 9.28s
+[STEP 1/7] Preparing one LongBench/TriviaQA sample
+The repository for THUDM/LongBench contains custom code which must be executed to correctly load the dataset. You can inspect the repository content at https://hf.co/datasets/THUDM/LongBench.
+You can avoid this prompt in future by passing the argument `trust_remote_code=True`.
+
+Do you wish to run the custom code? [y/N] The repository for zai-org/LongBench contains custom code which must be executed to correctly load the dataset. You can inspect the repository content at https://hf.co/datasets/zai-org/LongBench.
+You can avoid this prompt in future by passing the argument `trust_remote_code=True`.
+
+Do you wish to run the custom code? [y/N] [INFO] Temporary files preserved at: /local_datasets/surt321/sparkv-test/138536
