@@ -1,35 +1,47 @@
 #!/usr/bin/bash
-#SBATCH --job-name=sparkv-auto-smoke
+#SBATCH --job-name=sparkv-cpu-smoke
 #SBATCH --partition=batch_eebme_ugrad
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-gpu=16
-#SBATCH --mem-per-gpu=29G
-#SBATCH --time=0-06:00:00
-#SBATCH --output=logs/sparkv-auto-smoke-%j.out
-#SBATCH --error=logs/sparkv-auto-smoke-%j.err
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=29G
+#SBATCH --time=1-00:00:00
+#SBATCH --output=logs/sparkv-cpu-smoke-%j.out
+#SBATCH --error=logs/sparkv-cpu-smoke-%j.err
 
 set -Eeuo pipefail
 
 readonly EXPECTED_BRANCH="exp/sparkv-test"
 readonly MODEL_ID="${MODEL_ID:-Qwen/Qwen3-4B}"
+readonly CPU_DTYPE="${CPU_DTYPE:-float32}"
 readonly SAMPLES="${SAMPLES:-1}"
-readonly PROMPT_TOKENS="${PROMPT_TOKENS:-8193}"
-readonly CHUNK_SIZE="${CHUNK_SIZE:-1024}"
+readonly PROMPT_TOKENS="${PROMPT_TOKENS:-1025}"
+readonly CHUNK_SIZE="${CHUNK_SIZE:-256}"
 readonly REPEATS="${REPEATS:-1}"
-readonly QUALITY_TOKENS="${QUALITY_TOKENS:-16}"
+readonly QUALITY_TOKENS="${QUALITY_TOKENS:-4}"
 readonly BANDWIDTH_MBPS="${BANDWIDTH_MBPS:-640}"
 readonly JITTER_CV="${JITTER_CV:-0.0}"
-readonly SPLIT="${SPLIT:-4}"
+readonly SPLIT="${SPLIT:-2}"
 readonly SEED="${SEED:-2026}"
 
-readonly REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
+# Directory from which sbatch was submitted.
+readonly SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
+
+# Resolve the KV-cache repository root regardless of the submission
+# location inside the repository.
+REPO_ROOT="$(git -C "${SUBMIT_DIR}" rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "[ERROR] Could not locate the Git repository root from:" >&2
+    echo "[ERROR]   ${SUBMIT_DIR}" >&2
+    echo "[ERROR] Submit this job from somewhere inside the KV-cache repository." >&2
+    exit 2
+}
+readonly REPO_ROOT
+
 readonly JOB_ID="${SLURM_JOB_ID:-manual-$(date -u +%Y%m%dT%H%M%SZ)}"
-readonly LOCAL_ROOT="/local_datasets/${USER}/sparkv-test/${JOB_ID}"
+readonly LOCAL_ROOT="/local_datasets/${USER}/sparkv-cpu-smoke/${JOB_ID}"
 readonly CACHE_ROOT="${LOCAL_ROOT}/cache"
 readonly PREPARED="${LOCAL_ROOT}/prepared_triviaqa.pt"
-readonly RESULT_ROOT="${REPO_ROOT}/results/sparkv/smoke-${JOB_ID}"
+readonly RESULT_ROOT="${REPO_ROOT}/results/sparkv/cpu-smoke-${JOB_ID}"
 readonly PROFILE_JSON="${RESULT_ROOT}/profile.json"
 
 JOB_SUCCEEDED=0
@@ -44,7 +56,7 @@ on_error() {
 cleanup() {
     if [[ "${JOB_SUCCEEDED}" -eq 1 && "${KEEP_LOCAL_WORKDIR:-0}" -eq 0 ]]; then
         case "${LOCAL_ROOT}" in
-            /local_datasets/"${USER}"/sparkv-test/*)
+            /local_datasets/"${USER}"/sparkv-cpu-smoke/*)
                 rm -rf -- "${LOCAL_ROOT}"
                 echo "[INFO] Removed successful job's temporary cache: ${LOCAL_ROOT}"
                 ;;
@@ -73,9 +85,17 @@ if (( SPLIT < 0 || SPLIT > NUM_CHUNKS )); then
     exit 2
 fi
 
+if [[ "${CPU_DTYPE}" != "float32" && "${CPU_DTYPE}" != "bfloat16" ]]; then
+    echo "[ERROR] CPU_DTYPE must be float32 or bfloat16." >&2
+    exit 2
+fi
+
 if [[ ! -f baseline/sparkv/experiment.py || ! -f baseline/sparkv/scheduler.py ]]; then
-    echo "[ERROR] Submit this script from the KV-cache repository root." >&2
-    echo "[ERROR] Current submission directory: ${REPO_ROOT}" >&2
+    echo "[ERROR] Invalid KV-cache repository layout." >&2
+    echo "[ERROR] Detected repository root: ${REPO_ROOT}" >&2
+    echo "[ERROR] Expected:" >&2
+    echo "[ERROR]   ${REPO_ROOT}/baseline/sparkv/experiment.py" >&2
+    echo "[ERROR]   ${REPO_ROOT}/baseline/sparkv/scheduler.py" >&2
     exit 2
 fi
 
@@ -84,8 +104,6 @@ if [[ "$(git branch --show-current)" != "${EXPECTED_BRANCH}" ]]; then
     exit 2
 fi
 
-# Prefer the already activated environment inherited by sbatch. If it is not
-# active, initialize the user's Conda installation and activate lab explicitly.
 if [[ "${CONDA_DEFAULT_ENV:-}" != "lab" ]]; then
     CONDA_SH=""
     for candidate in \
@@ -119,9 +137,10 @@ export HF_HOME="${HF_HOME:-/data/${USER}/hf_cache}"
 export HF_DATASETS_CACHE="${LOCAL_ROOT}/hf_datasets"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}"
-export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}"
-export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}"
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
+export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
+export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
+export CUDA_VISIBLE_DEVICES=""
 
 mkdir -p "${HF_HOME}" "${HF_DATASETS_CACHE}"
 
@@ -134,6 +153,8 @@ mkdir -p "${HF_HOME}" "${HF_DATASETS_CACHE}"
     echo "commit=$(git rev-parse HEAD)"
     echo "python=$(command -v python)"
     echo "conda_env=${CONDA_DEFAULT_ENV:-unset}"
+    echo "requested_device=cpu"
+    echo "cpu_dtype=${CPU_DTYPE}"
     echo "model=${MODEL_ID}"
     echo "samples=${SAMPLES}"
     echo "prompt_tokens=${PROMPT_TOKENS}"
@@ -147,11 +168,6 @@ mkdir -p "${HF_HOME}" "${HF_DATASETS_CACHE}"
 } | tee "${RESULT_ROOT}/run_manifest.txt"
 
 git status --short > "${RESULT_ROOT}/git_status.txt"
-if ! nvidia-smi --query-gpu=name,memory.total,driver_version \
-    --format=csv,noheader | tee "${RESULT_ROOT}/gpu.txt"; then
-    echo "[WARN] nvidia-smi failed; the experiment will try the CPU fallback." \
-        | tee -a "${RESULT_ROOT}/gpu.txt" >&2
-fi
 python -m pip freeze > "${RESULT_ROOT}/pip_freeze.txt"
 
 python - <<'PY' | tee "${RESULT_ROOT}/preflight.txt"
@@ -173,6 +189,7 @@ packages = [
     "nvidia-ml-py",
     "pytest",
 ]
+
 installed = {}
 for package in packages:
     try:
@@ -180,27 +197,31 @@ for package in packages:
     except Exception as exc:
         raise SystemExit(f"Required package is unavailable: {package}: {exc}") from exc
 
+if torch.cuda.is_available():
+    raise SystemExit(
+        "CPU job unexpectedly exposes CUDA. Check CUDA_VISIBLE_DEVICES and Slurm directives."
+    )
+
 print(json.dumps({
     "packages": installed,
     "cuda_available": torch.cuda.is_available(),
-    "cuda_version": torch.version.cuda,
-    "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-    "gpu_count": torch.cuda.device_count(),
-    "bf16_supported": (
-        torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False
-    ),
+    "cuda_visible_devices": "",
+    "cpu_threads": torch.get_num_threads(),
 }, indent=2))
 PY
 
 if ! python -m pip check | tee "${RESULT_ROOT}/pip_check.txt"; then
-    echo "[WARN] pip reported an environment conflict; continuing to the import/tests." >&2
+    echo "[WARN] pip reported an environment conflict; continuing to import/tests." >&2
 fi
+
 python -m py_compile \
     baseline/sparkv/experiment.py \
     baseline/sparkv/scheduler.py \
     baseline/sparkv/utils/validate_results.py \
     baseline/sparkv/utils/summarize_results.py
-python -m pytest -q baseline/sparkv/tests
+
+python -m pytest -q baseline/sparkv/tests \
+    | tee "${RESULT_ROOT}/pytest.txt"
 
 echo "[STEP 1/7] Preparing one LongBench/TriviaQA sample"
 python -m baseline.sparkv.experiment prepare \
@@ -209,7 +230,7 @@ python -m baseline.sparkv.experiment prepare \
     --prompt-tokens "${PROMPT_TOKENS}" \
     --output "${PREPARED}"
 
-echo "[STEP 2/7] Building raw and q5 KV-cache files"
+echo "[STEP 2/7] Building raw and q5 KV-cache files on CPU"
 python -m baseline.sparkv.experiment build-cache \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
@@ -217,22 +238,22 @@ python -m baseline.sparkv.experiment build-cache \
     --formats raw q5 \
     --samples "${SAMPLES}" \
     --chunk-size "${CHUNK_SIZE}" \
-    --device auto \
-    --cpu-dtype float32
+    --device cpu \
+    --cpu-dtype "${CPU_DTYPE}"
 
 du -sh "${CACHE_ROOT}" | tee "${RESULT_ROOT}/cache_size.txt"
 cp "${CACHE_ROOT}/raw/sample_000/meta.json" "${RESULT_ROOT}/raw_meta.json"
 cp "${CACHE_ROOT}/q5/sample_000/meta.json" "${RESULT_ROOT}/q5_meta.json"
 
-echo "[STEP 3/7] Profiling per-chunk, per-layer compute time"
+echo "[STEP 3/7] Profiling per-chunk, per-layer CPU time"
 python -m baseline.sparkv.experiment profile \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
     --samples "${SAMPLES}" \
     --chunk-size "${CHUNK_SIZE}" \
     --output "${PROFILE_JSON}" \
-    --device auto \
-    --cpu-dtype float32
+    --device cpu \
+    --cpu-dtype "${CPU_DTYPE}"
 
 echo "[STEP 4/7] Generating offline scheduler outputs"
 for format in raw q5; do
@@ -245,7 +266,7 @@ for format in raw q5; do
         --output "${RESULT_ROOT}/schedule_${format}.json"
 done
 
-echo "[STEP 5/7] Running raw-cache strategies"
+echo "[STEP 5/7] Running raw-cache strategies on CPU"
 python -m baseline.sparkv.experiment run \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
@@ -260,10 +281,10 @@ python -m baseline.sparkv.experiment run \
     --quality-tokens "${QUALITY_TOKENS}" \
     --seed "${SEED}" \
     --output "${RESULT_ROOT}/raw.jsonl" \
-    --device auto \
-    --cpu-dtype float32
+    --device cpu \
+    --cpu-dtype "${CPU_DTYPE}"
 
-echo "[STEP 6/7] Running q5-cache strategies"
+echo "[STEP 6/7] Running q5-cache strategies on CPU"
 python -m baseline.sparkv.experiment run \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
@@ -278,12 +299,13 @@ python -m baseline.sparkv.experiment run \
     --quality-tokens "${QUALITY_TOKENS}" \
     --seed "${SEED}" \
     --output "${RESULT_ROOT}/q5.jsonl" \
-    --device auto \
-    --cpu-dtype float32
+    --device cpu \
+    --cpu-dtype "${CPU_DTYPE}"
 
 echo "[STEP 7/7] Validating raw equivalence and summarizing metrics"
 python baseline/sparkv/utils/validate_results.py "${RESULT_ROOT}/raw.jsonl" \
     | tee "${RESULT_ROOT}/validation.txt"
+
 python baseline/sparkv/utils/summarize_results.py \
     "${RESULT_ROOT}/raw.jsonl" \
     "${RESULT_ROOT}/q5.jsonl" \
@@ -292,7 +314,9 @@ python baseline/sparkv/utils/summarize_results.py \
 
 echo "utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     | tee -a "${RESULT_ROOT}/run_manifest.txt"
-echo "[SUCCESS] SparKV smoke pipeline completed."
+
+echo "[SUCCESS] SparKV CPU smoke pipeline completed."
 echo "[SUCCESS] Persistent results: ${RESULT_ROOT}"
+echo "[NOTICE] CPU timing is a functional check and must not be compared with GPU TTFT."
 
 JOB_SUCCEEDED=1
