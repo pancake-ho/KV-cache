@@ -60,7 +60,7 @@ def prepare(args: argparse.Namespace) -> None:
     except Exception as exc:
         warnings.warn(
             "THUDM/LongBench 로드에 실패했습니다."
-            f"zai-org/LonBench로 재시도를 진행합니다. 원인: {type{exc}.__name__}: {exc}"
+            f"zai-org/LonBench로 재시도를 진행합니다. 원인: {type(exc).__name__}: {exc}"
         )
         dataset = load_dataset("zai-org/LongBench", "triviaqa", split="test", trust_remote_code=True,)
 

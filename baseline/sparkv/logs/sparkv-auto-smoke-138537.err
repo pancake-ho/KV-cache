@@ -1,0 +1,6 @@
+  File "baseline/sparkv/experiment.py", line 63
+    (type{exc}.__name__)
+     ^^^^^^^^^^^^^^^^^^
+SyntaxError: f-string: invalid syntax. Perhaps you forgot a comma?
+[ERROR] line=213 exit_code=1
+[ERROR] Temporary files are preserved at: /local_datasets/surt321/sparkv-test/138537
