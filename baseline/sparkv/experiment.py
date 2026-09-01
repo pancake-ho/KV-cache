@@ -28,7 +28,7 @@ from transformers import (
     BitsAndBytesConfig,
     DynamicCache,
 )
-from baseline.sparkv.sparkv_executor import execute_sparkv_schedule
+from baseline.sparkv.executor import execute_sparkv_schedule
 
 
 MODEL_ID = "Qwen/Qwen3-4B"
@@ -770,30 +770,40 @@ def run_request(
         result = {
             "strategy": strategy,
             "format": fmt,
+
             "ttft_ms": ttft_ms,
             "ttft_energy_j": ttft_energy_j,
 
-            # 기존 summary schema 유지
+            # Compatibility metrics used by the current summary.
             "local_chunks": (
                 schedule_stats
                 .actual_compute_token_forwards
             ),
+
             "fetched_chunks": (
                 schedule_stats
                 .fetched_token_files
             ),
 
+            # Actual network traffic.
             "wire_bytes": (
-                schedule_stats.wire_bytes
+                schedule_stats
+                .wire_bytes
             ),
+
             "disk_ms": (
-                schedule_stats.disk_ms
+                schedule_stats
+                .disk_ms
             ),
+
             "wire_ms": (
-                schedule_stats.wire_ms
+                schedule_stats
+                .wire_ms
             ),
+
             "decode_ms": (
-                schedule_stats.decode_ms
+                schedule_stats
+                .decode_ms
             ),
 
             "peak_vram_mib": (
@@ -815,10 +825,12 @@ def run_request(
             "runtime_device": str(
                 runtime.device
             ),
+
             "runtime_dtype": (
                 str(runtime.dtype)
                 .removeprefix("torch.")
             ),
+
             "runtime_backend": (
                 runtime.backend
             ),
@@ -828,6 +840,10 @@ def run_request(
             "f1": qa_f1(
                 prediction,
                 record["answers"],
+            ),
+
+            "schedule_path": str(
+                schedule_path
             ),
         }
 

@@ -213,6 +213,7 @@ fi
 python -m py_compile \
     baseline/sparkv/experiment.py \
     baseline/sparkv/scheduler.py \
+    baseline/sparkv/executor.py \
     baseline/sparkv/utils/validate_results.py \
     baseline/sparkv/utils/summarize_results.py
 python -m pytest -q baseline/sparkv/tests
@@ -260,13 +261,19 @@ for format in raw q5; do
         --output "${RESULT_ROOT}/schedule_${format}.json"
 done
 
-echo "[STEP 5/7] Running raw-cache strategies"
+echo "[STEP 5/7] Running raw-cache strategies including SparKV"
+
 python -m baseline.sparkv.experiment run \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
     --cache-root "${CACHE_ROOT}" \
     --format raw \
-    --strategies local fetch static adaptive \
+    --strategies \
+        local \
+        fetch \
+        static \
+        adaptive \
+        sparkv \
     --split "${SPLIT}" \
     --bandwidth-mbps "${BANDWIDTH_MBPS}" \
     --jitter-cv "${JITTER_CV}" \
@@ -274,17 +281,24 @@ python -m baseline.sparkv.experiment run \
     --repeats "${REPEATS}" \
     --quality-tokens "${QUALITY_TOKENS}" \
     --seed "${SEED}" \
+    --schedule "${RESULT_ROOT}/schedule_raw.json" \
     --output "${RESULT_ROOT}/raw.jsonl" \
     --device auto \
     --cpu-dtype float32
 
-echo "[STEP 6/7] Running q5-cache strategies"
+echo "[STEP 6/7] Running q5-cache strategies including SparKV"
+
 python -m baseline.sparkv.experiment run \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
     --cache-root "${CACHE_ROOT}" \
     --format q5 \
-    --strategies local fetch static adaptive \
+    --strategies \
+        local \
+        fetch \
+        static \
+        adaptive \
+        sparkv \
     --split "${SPLIT}" \
     --bandwidth-mbps "${BANDWIDTH_MBPS}" \
     --jitter-cv "${JITTER_CV}" \
@@ -292,6 +306,7 @@ python -m baseline.sparkv.experiment run \
     --repeats "${REPEATS}" \
     --quality-tokens "${QUALITY_TOKENS}" \
     --seed "${SEED}" \
+    --schedule "${RESULT_ROOT}/schedule_q5.json" \
     --output "${RESULT_ROOT}/q5.jsonl" \
     --device auto \
     --cpu-dtype float32

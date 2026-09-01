@@ -1,22 +1,42 @@
+import copy
+
+import pytest
 import torch
+
+from baseline.sparkv.executor import (
+    _append_token,
+    _schedule_assignments,
+    _validate_against_meta,
+)
 
 from baseline.sparkv.scheduler import (
     Chunk,
     SparKVScheduler,
 )
 
-from baseline.sparkv.sparkv_executor import (
-    _append_token,
-    _validate_against_meta,
-)
 
-
-def make_schedule():
+def make_scheduler(
+    *,
+    token_chunks: int = 2,
+    layers: int = 3,
+    heads: int = 2,
+    delta_ms: float = 2.0,
+):
     chunks = [
-        Chunk(t, layer, head)
-        for t in range(2)
-        for layer in range(2)
-        for head in range(2)
+        Chunk(
+            t,
+            layer,
+            head,
+        )
+        for t in range(
+            token_chunks
+        )
+        for layer in range(
+            layers
+        )
+        for head in range(
+            heads
+        )
     ]
 
     comp = {
@@ -30,23 +50,75 @@ def make_schedule():
     }
 
     return SparKVScheduler(
-        token_chunks=2,
-        layers=2,
-        heads=2,
+        token_chunks=token_chunks,
+        layers=layers,
+        heads=heads,
         comp_ms=comp,
         stream_ms=stream,
-        delta_ms=2.0,
-    ).run()
+        delta_ms=delta_ms,
+    )
+
+
+def make_meta(
+    *,
+    token_chunks: int,
+    layers: int,
+    heads: int,
+    chunk_size: int = 3,
+):
+    seq_len = (
+        token_chunks
+        * chunk_size
+    )
+
+    return {
+        "seq_len": seq_len,
+        "chunk_size": chunk_size,
+        "num_chunks": token_chunks,
+        "layers": layers,
+        "kv_heads": heads,
+
+        "chunks": [
+            {
+                "index": t,
+
+                "wire_bytes": (
+                    layers
+                    * heads
+                    * 16
+                ),
+
+                "lh_wire_bytes": {
+                    f"{layer}:{head}": 16
+                    for layer in range(
+                        layers
+                    )
+                    for head in range(
+                        heads
+                    )
+                },
+            }
+            for t in range(
+                token_chunks
+            )
+        ],
+    }
 
 
 def test_schedule_contract_matches_cache_geometry():
-    schedule = make_schedule()
+    scheduler = make_scheduler(
+        token_chunks=2,
+        layers=2,
+        heads=2,
+    )
 
-    meta = {
-        "num_chunks": 2,
-        "layers": 2,
-        "kv_heads": 2,
-    }
+    schedule = scheduler.run()
+
+    meta = make_meta(
+        token_chunks=2,
+        layers=2,
+        heads=2,
+    )
 
     assignments, stream_order = (
         _validate_against_meta(
@@ -64,10 +136,172 @@ def test_schedule_contract_matches_cache_geometry():
         "stream",
     }
 
-    assert all(
-        assignments[c] == "stream"
-        for c in stream_order
+    assert len(stream_order) == sum(
+        route == "stream"
+        for route in assignments.values()
     )
+
+    assert all(
+        assignments[chunk]
+        == "stream"
+        for chunk in stream_order
+    )
+
+
+def test_schedule_contains_every_unit_exactly_once():
+    scheduler = make_scheduler(
+        token_chunks=3,
+        layers=2,
+        heads=2,
+    )
+
+    schedule = scheduler.run()
+
+    assignments, _ = (
+        _schedule_assignments(
+            schedule
+        )
+    )
+
+    expected = {
+        Chunk(
+            t,
+            layer,
+            head,
+        )
+        for t in range(3)
+        for layer in range(2)
+        for head in range(2)
+    }
+
+    assert set(assignments) == expected
+
+    assert (
+        len(assignments)
+        == 3 * 2 * 2
+    )
+
+
+def test_duplicate_scheduled_unit_is_rejected():
+    scheduler = make_scheduler(
+        token_chunks=2,
+        layers=2,
+        heads=1,
+    )
+
+    schedule = scheduler.run()
+
+    duplicate = copy.deepcopy(
+        schedule
+    )
+
+    source = None
+
+    for stage in duplicate[
+        "stages"
+    ]:
+        for operation in (
+            "compute",
+            "stream",
+        ):
+            if stage[operation]:
+                source = copy.deepcopy(
+                    stage[operation][0]
+                )
+
+                stage[
+                    operation
+                ].append(source)
+
+                duplicate["chunks"] += 1
+
+                if (
+                    operation
+                    == "compute"
+                ):
+                    duplicate[
+                        "compute_chunks"
+                    ] += 1
+                else:
+                    duplicate[
+                        "stream_chunks"
+                    ] += 1
+
+                break
+
+        if source is not None:
+            break
+
+    assert source is not None
+
+    with pytest.raises(
+        ValueError,
+        match="duplicate scheduled unit",
+    ):
+        _schedule_assignments(
+            duplicate
+        )
+
+
+def test_geometry_mismatch_is_rejected():
+    scheduler = make_scheduler(
+        token_chunks=2,
+        layers=2,
+        heads=2,
+    )
+
+    schedule = scheduler.run()
+
+    wrong_meta = make_meta(
+        token_chunks=2,
+        layers=2,
+        heads=3,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "schedule/cache geometry "
+            "mismatch"
+        ),
+    ):
+        _validate_against_meta(
+            schedule,
+            wrong_meta,
+        )
+
+
+def test_missing_wire_metadata_is_rejected():
+    scheduler = make_scheduler(
+        token_chunks=2,
+        layers=2,
+        heads=2,
+    )
+
+    schedule = scheduler.run()
+
+    meta = make_meta(
+        token_chunks=2,
+        layers=2,
+        heads=2,
+    )
+
+    del meta[
+        "chunks"
+    ][0][
+        "lh_wire_bytes"
+    ][
+        "1:1"
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="missing wire size",
+    ):
+        _validate_against_meta(
+            schedule,
+            meta,
+        )
 
 
 def test_append_token_preserves_token_and_head_order():
@@ -80,9 +314,9 @@ def test_append_token_preserves_token_and_head_order():
 
     for layer in range(layers):
         for head in range(heads):
-
             a = float(
-                10 * layer + head
+                10 * layer
+                + head
             )
 
             b = float(
@@ -154,9 +388,8 @@ def test_append_token_preserves_token_and_head_order():
         layers=layers,
         heads=heads,
         chunk_size=chunk_size,
-        to_legacy=lambda x: (
-            x.to_legacy_cache()
-        ),
+        to_legacy=lambda x:
+            x.to_legacy_cache(),
     )
 
     cache = _append_token(
@@ -166,9 +399,8 @@ def test_append_token_preserves_token_and_head_order():
         layers=layers,
         heads=heads,
         chunk_size=chunk_size,
-        to_legacy=lambda x: (
-            x.to_legacy_cache()
-        ),
+        to_legacy=lambda x:
+            x.to_legacy_cache(),
     )
 
     assert (
@@ -224,3 +456,44 @@ def test_append_token_preserves_token_and_head_order():
         ]
         == 101.0
     )
+
+
+def test_append_token_rejects_missing_head():
+    chunk_size = 3
+
+    units = {
+        Chunk(
+            0,
+            0,
+            0,
+        ): (
+            torch.zeros(
+                1,
+                1,
+                chunk_size,
+                4,
+            ),
+
+            torch.zeros(
+                1,
+                1,
+                chunk_size,
+                4,
+            ),
+        )
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="missing KV unit",
+    ):
+        _append_token(
+            None,
+            units,
+            t=0,
+            layers=1,
+            heads=2,
+            chunk_size=chunk_size,
+            to_legacy=lambda x:
+                x.to_legacy_cache(),
+        )
