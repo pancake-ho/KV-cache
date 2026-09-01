@@ -71,37 +71,106 @@ def make_meta(
         * chunk_size
     )
 
-    return {
-        "seq_len": seq_len,
-        "chunk_size": chunk_size,
-        "num_chunks": token_chunks,
-        "layers": layers,
-        "kv_heads": heads,
+    wire_bytes_per_unit = 16
 
-        "chunks": [
+    chunks = []
+
+    unit_files = {}
+
+    for t in range(
+        token_chunks
+    ):
+        lh_wire_bytes = {
+            f"{layer}:{head}":
+                wire_bytes_per_unit
+            for layer in range(
+                layers
+            )
+            for head in range(
+                heads
+            )
+        }
+
+        chunks.append(
             {
                 "index": t,
 
                 "wire_bytes": (
                     layers
                     * heads
-                    * 16
+                    * wire_bytes_per_unit
                 ),
 
-                "lh_wire_bytes": {
-                    f"{layer}:{head}": 16
-                    for layer in range(
-                        layers
-                    )
-                    for head in range(
-                        heads
-                    )
-                },
+                "lh_wire_bytes":
+                    lh_wire_bytes,
             }
-            for t in range(
-                token_chunks
-            )
-        ],
+        )
+
+        for layer in range(
+            layers
+        ):
+            for head in range(
+                heads
+            ):
+                key = (
+                    f"{t}:"
+                    f"{layer}:"
+                    f"{head}"
+                )
+
+                unit_files[key] = {
+                    "path": (
+                        f"units/"
+                        f"t{t:03d}/"
+                        f"l{layer:02d}_"
+                        f"h{head:02d}"
+                        f".safetensors"
+                    ),
+
+                    "wire_bytes":
+                        wire_bytes_per_unit,
+
+                    # Synthetic metadata only.
+                    # Actual value is produced by
+                    # unit_cache.materialize_sample().
+                    "storage_bytes":
+                        wire_bytes_per_unit,
+                }
+
+    return {
+        "seq_len": seq_len,
+
+        "chunk_size":
+            chunk_size,
+
+        "num_chunks":
+            token_chunks,
+
+        "layers":
+            layers,
+
+        "kv_heads":
+            heads,
+
+        "chunks":
+            chunks,
+
+        # P1 fine-grained streaming
+        # metadata contract.
+        "unit_layout_version": 1,
+
+        "unit_files":
+            unit_files,
+
+        "unit_file_count":
+            len(unit_files),
+
+        "unit_wire_bytes": (
+            token_chunks
+            * layers
+            * heads
+            * wire_bytes_per_unit
+        ),
     }
 
 

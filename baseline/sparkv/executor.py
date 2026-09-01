@@ -176,7 +176,10 @@ def _schedule_assignments(
 def _validate_against_meta(
     schedule: dict[str, Any],
     meta: dict[str, Any],
-) -> tuple[dict[Chunk, str], list[Chunk]]:
+) -> tuple[
+    dict[Chunk, str],
+    list[Chunk],
+]:
     required_meta = {
         "num_chunks",
         "layers",
@@ -187,43 +190,380 @@ def _validate_against_meta(
         "unit_layout_version",
         "unit_files",
     }
-    missing = required_meta - set(meta)
+
+    missing = (
+        required_meta
+        - set(meta)
+    )
+
     if missing:
         raise ValueError(
             "cache metadata missing fields: "
             f"{sorted(missing)}"
         )
 
-    if int(meta["unit_layout_version"]) < 1:
-        raise ValueError("fine-grained unit layout version is invalid")
+    if int(
+        meta["unit_layout_version"]
+    ) < 1:
+        raise ValueError(
+            "fine-grained unit layout "
+            "version is invalid"
+        )
 
-    assignments, stream_order = _schedule_assignments(schedule)
+    assignments, stream_order = (
+        _schedule_assignments(
+            schedule
+        )
+    )
 
-    T = int(meta["num_chunks"])
-    L = int(meta["layers"])
-    H = int(meta["kv_heads"])
+    T = int(
+        meta["num_chunks"]
+    )
+
+    L = int(
+        meta["layers"]
+    )
+
+    H = int(
+        meta["kv_heads"]
+    )
+
+    chunk_size = int(
+        meta["chunk_size"]
+    )
+
+    seq_len = int(
+        meta["seq_len"]
+    )
+
+    if (
+        T <= 0
+        or L <= 0
+        or H <= 0
+        or chunk_size <= 0
+    ):
+        raise ValueError(
+            "invalid cache geometry: "
+            f"T={T}, "
+            f"L={L}, "
+            f"H={H}, "
+            f"chunk_size={chunk_size}"
+        )
+
+    if (
+        T * chunk_size
+        != seq_len
+    ):
+        raise ValueError(
+            "cache sequence geometry "
+            "mismatch: "
+            f"T*chunk_size="
+            f"{T * chunk_size}, "
+            f"seq_len={seq_len}"
+        )
+
     expected = {
-        Chunk(t, layer, head)
+        Chunk(
+            t,
+            layer,
+            head,
+        )
         for t in range(T)
         for layer in range(L)
         for head in range(H)
     }
 
-    if set(assignments) != expected:
-        missing_units = sorted(expected - set(assignments))
-        extra_units = sorted(set(assignments) - expected)
-        raise ValueError(
-            "schedule/cache geometry mismatch; "
-            f"missing={missing_units[:5]}, extra={extra_units[:5]}"
+    actual = set(
+        assignments
+    )
+
+    # Check scheduler geometry first.
+    # This preserves the intended failure
+    # contract of geometry tests.
+    if actual != expected:
+        missing_units = sorted(
+            expected - actual
         )
 
-    unit_files = meta["unit_files"]
-    for chunk in expected:
-        key = f"{chunk.t}:{chunk.layer}:{chunk.head}"
-        if key not in unit_files:
-            raise ValueError(f"unit file metadata missing for {key}")
+        extra_units = sorted(
+            actual - expected
+        )
 
-    return assignments, stream_order
+        raise ValueError(
+            "schedule/cache geometry "
+            "mismatch; "
+            f"missing="
+            f"{missing_units[:5]}, "
+            f"extra="
+            f"{extra_units[:5]}"
+        )
+
+    if int(
+        schedule["chunks"]
+    ) != (
+        T * L * H
+    ):
+        raise ValueError(
+            "schedule unit count "
+            "does not match "
+            "cache geometry"
+        )
+
+    chunks_meta = (
+        meta["chunks"]
+    )
+
+    if not isinstance(
+        chunks_meta,
+        list,
+    ):
+        raise ValueError(
+            "meta['chunks'] "
+            "must be a list"
+        )
+
+    if len(
+        chunks_meta
+    ) != T:
+        raise ValueError(
+            "metadata token-chunk "
+            "count mismatch: "
+            f"expected={T}, "
+            f"got={len(chunks_meta)}"
+        )
+
+    # ----------------------------------------------------------
+    # Validate legacy/logical wire metadata.
+    #
+    # scheduler.py still relies on:
+    # meta["chunks"][t]["lh_wire_bytes"]["layer:head"]
+    # ----------------------------------------------------------
+    for t in range(T):
+        chunk_meta = (
+            chunks_meta[t]
+        )
+
+        index = int(
+            chunk_meta.get(
+                "index",
+                t,
+            )
+        )
+
+        if index != t:
+            raise ValueError(
+                "metadata chunk index "
+                "mismatch: "
+                f"expected={t}, "
+                f"got={index}"
+            )
+
+        lh_wire_bytes = (
+            chunk_meta.get(
+                "lh_wire_bytes"
+            )
+        )
+
+        if not isinstance(
+            lh_wire_bytes,
+            dict,
+        ):
+            raise ValueError(
+                "missing wire metadata "
+                f"for token chunk {t}"
+            )
+
+        for layer in range(L):
+            for head in range(H):
+                wire_key = (
+                    f"{layer}:"
+                    f"{head}"
+                )
+
+                if (
+                    wire_key
+                    not in
+                    lh_wire_bytes
+                ):
+                    raise ValueError(
+                        "missing wire size "
+                        f"for "
+                        f"t={t}, "
+                        f"layer={layer}, "
+                        f"head={head}"
+                    )
+
+                wire_bytes = int(
+                    lh_wire_bytes[
+                        wire_key
+                    ]
+                )
+
+                if wire_bytes < 0:
+                    raise ValueError(
+                        "negative wire size "
+                        f"for "
+                        f"t={t}, "
+                        f"layer={layer}, "
+                        f"head={head}"
+                    )
+
+    # ----------------------------------------------------------
+    # Validate physical fine-grained unit-file metadata.
+    # ----------------------------------------------------------
+    unit_files = (
+        meta["unit_files"]
+    )
+
+    if not isinstance(
+        unit_files,
+        dict,
+    ):
+        raise ValueError(
+            "meta['unit_files'] "
+            "must be a dict"
+        )
+
+    for chunk in expected:
+        unit_key = (
+            f"{chunk.t}:"
+            f"{chunk.layer}:"
+            f"{chunk.head}"
+        )
+
+        if (
+            unit_key
+            not in unit_files
+        ):
+            raise ValueError(
+                "unit file metadata "
+                "missing for "
+                f"{unit_key}"
+            )
+
+        info = (
+            unit_files[
+                unit_key
+            ]
+        )
+
+        if not isinstance(
+            info,
+            dict,
+        ):
+            raise ValueError(
+                "invalid unit file "
+                "metadata for "
+                f"{unit_key}"
+            )
+
+        required_unit_fields = {
+            "path",
+            "wire_bytes",
+            "storage_bytes",
+        }
+
+        missing_fields = (
+            required_unit_fields
+            - set(info)
+        )
+
+        if missing_fields:
+            raise ValueError(
+                "unit file metadata "
+                f"missing fields for "
+                f"{unit_key}: "
+                f"{sorted(missing_fields)}"
+            )
+
+        path = str(
+            info["path"]
+        )
+
+        if not path:
+            raise ValueError(
+                "empty unit file path "
+                f"for {unit_key}"
+            )
+
+        physical_wire_bytes = int(
+            info[
+                "wire_bytes"
+            ]
+        )
+
+        storage_bytes = int(
+            info[
+                "storage_bytes"
+            ]
+        )
+
+        if (
+            physical_wire_bytes
+            < 0
+        ):
+            raise ValueError(
+                "negative unit wire "
+                "size for "
+                f"{unit_key}"
+            )
+
+        if storage_bytes < 0:
+            raise ValueError(
+                "negative unit storage "
+                "size for "
+                f"{unit_key}"
+            )
+
+        # Logical scheduler wire size and
+        # unit-file wire size must agree.
+        logical_wire_bytes = int(
+            chunks_meta[
+                chunk.t
+            ][
+                "lh_wire_bytes"
+            ][
+                f"{chunk.layer}:"
+                f"{chunk.head}"
+            ]
+        )
+
+        if (
+            physical_wire_bytes
+            != logical_wire_bytes
+        ):
+            raise ValueError(
+                "wire-size metadata "
+                "mismatch for "
+                f"{unit_key}: "
+                f"logical="
+                f"{logical_wire_bytes}, "
+                f"unit="
+                f"{physical_wire_bytes}"
+            )
+
+    if (
+        "unit_file_count"
+        in meta
+        and int(
+            meta[
+                "unit_file_count"
+            ]
+        )
+        != len(expected)
+    ):
+        raise ValueError(
+            "unit_file_count "
+            "mismatch: "
+            f"expected={len(expected)}, "
+            f"got="
+            f"{meta['unit_file_count']}"
+        )
+
+    return (
+        assignments,
+        stream_order,
+    )
 
 
 @dataclass
