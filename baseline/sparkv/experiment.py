@@ -28,6 +28,7 @@ from transformers import (
     BitsAndBytesConfig,
     DynamicCache,
 )
+from baseline.sparkv.sparkv_executor import execute_sparkv_schedule
 
 
 MODEL_ID = "Qwen/Qwen3-4B"
@@ -688,80 +689,301 @@ def run_request(
     jitter_cv: float,
     quality_tokens: int,
     rng_seed: int,
+    schedule_path: str | None = None,
 ) -> dict[str, Any]:
     meta = load_meta(sample_dir)
     chunks = int(meta["num_chunks"])
     chunk_size = int(meta["chunk_size"])
-    fetched: dict[int, dict[str, torch.Tensor]] = {}
+
+    # --------------------------------------------------------------
+    # SparKV scheduler-runtime integration
+    # --------------------------------------------------------------
+    if strategy == "sparkv":
+        if schedule_path is None:
+            raise ValueError(
+                "strategy='sparkv' requires --schedule"
+            )
+
+        device_synchronize(runtime)
+
+        if runtime.is_cuda:
+            torch.cuda.reset_peak_memory_stats(
+                runtime.device
+            )
+
+        power = PowerSampler(
+            enabled=runtime.is_cuda
+        )
+        power.start()
+
+        request_start = time.perf_counter()
+
+        context_cache, schedule_stats = (
+            execute_sparkv_schedule(
+                model=model,
+                record=record,
+                sample_dir=sample_dir,
+                fmt=fmt,
+                schedule_path=schedule_path,
+                bandwidth_mbps=bandwidth_mbps,
+                jitter_cv=jitter_cv,
+                rng_seed=rng_seed,
+                runtime=runtime,
+                compute_one_chunk=compute_one_chunk,
+                to_legacy=to_legacy,
+            )
+        )
+
+        first, decode_cache = first_step(
+            model,
+            int(record["seed_id"]),
+            context_cache,
+            runtime,
+        )
+
+        device_synchronize(runtime)
+
+        ttft_ms = (
+            time.perf_counter()
+            - request_start
+        ) * 1000.0
+
+        ttft_energy_j = power.stop()
+
+        generated = continue_greedy(
+            model,
+            first,
+            decode_cache,
+            max_new_tokens=max(
+                1,
+                quality_tokens,
+            ),
+            eos=tokenizer.eos_token_id,
+            runtime=runtime,
+        )
+
+        prediction = tokenizer.decode(
+            generated,
+            skip_special_tokens=True,
+        ).strip()
+
+        result = {
+            "strategy": strategy,
+            "format": fmt,
+            "ttft_ms": ttft_ms,
+            "ttft_energy_j": ttft_energy_j,
+
+            # 기존 summary schema 유지
+            "local_chunks": (
+                schedule_stats
+                .actual_compute_token_forwards
+            ),
+            "fetched_chunks": (
+                schedule_stats
+                .fetched_token_files
+            ),
+
+            "wire_bytes": (
+                schedule_stats.wire_bytes
+            ),
+            "disk_ms": (
+                schedule_stats.disk_ms
+            ),
+            "wire_ms": (
+                schedule_stats.wire_ms
+            ),
+            "decode_ms": (
+                schedule_stats.decode_ms
+            ),
+
+            "peak_vram_mib": (
+                torch.cuda.max_memory_allocated(
+                    runtime.device
+                )
+                / 2**20
+                if runtime.is_cuda
+                else 0.0
+            ),
+
+            "rss_mib": (
+                psutil.Process()
+                .memory_info()
+                .rss
+                / 2**20
+            ),
+
+            "runtime_device": str(
+                runtime.device
+            ),
+            "runtime_dtype": (
+                str(runtime.dtype)
+                .removeprefix("torch.")
+            ),
+            "runtime_backend": (
+                runtime.backend
+            ),
+
+            "prediction": prediction,
+
+            "f1": qa_f1(
+                prediction,
+                record["answers"],
+            ),
+        }
+
+        result.update(
+            schedule_stats.to_dict()
+        )
+
+        return result
+
+    # --------------------------------------------------------------
+    # 기존 baseline
+    # local / fetch / static / adaptive
+    # --------------------------------------------------------------
+    fetched: dict[
+        int,
+        dict[str, torch.Tensor],
+    ] = {}
+
     fetch_total = FetchStats()
-    fetch_error: list[BaseException] = []
+    fetch_error: list[
+        BaseException
+    ] = []
+
     local_cache = None
     local_chunks = 0
-    copy_stream = torch.cuda.Stream() if runtime.is_cuda else None
-    rng = np.random.default_rng(rng_seed)
 
-    state = MeetingState(chunks) if strategy == "adaptive" else None
+    copy_stream = (
+        torch.cuda.Stream()
+        if runtime.is_cuda
+        else None
+    )
+
+    rng = np.random.default_rng(
+        rng_seed
+    )
+
+    state = (
+        MeetingState(chunks)
+        if strategy == "adaptive"
+        else None
+    )
+
     if strategy == "local":
         split = chunks
+
     elif strategy == "fetch":
         split = 0
+
     elif strategy == "static":
         if not 0 <= split <= chunks:
-            raise ValueError("split must be between 0 and num_chunks")
+            raise ValueError(
+                "split must be between "
+                "0 and num_chunks"
+            )
+
     elif strategy != "adaptive":
         raise ValueError(strategy)
 
     def fetch_worker() -> None:
         nonlocal fetch_total
+
         try:
             if runtime.is_cuda:
-                torch.cuda.set_device(runtime.device)
+                torch.cuda.set_device(
+                    runtime.device
+                )
+
             if strategy == "adaptive":
                 assert state is not None
-                getter: Callable[[], int | None] = state.claim_fetch
+
+                getter: Callable[
+                    [],
+                    int | None,
+                ] = state.claim_fetch
+
             else:
-                indices = iter(range(chunks - 1, split - 1, -1))
-                getter = lambda: next(indices, None)
+                indices = iter(
+                    range(
+                        chunks - 1,
+                        split - 1,
+                        -1,
+                    )
+                )
+
+                getter = lambda: next(
+                    indices,
+                    None,
+                )
+
             while True:
                 t = getter()
+
                 if t is None:
                     break
-                resident, stats = fetch_one_chunk(
-                    sample_dir,
-                    meta,
-                    fmt,
-                    t,
-                    bandwidth_mbps,
-                    jitter_cv,
-                    rng,
-                    runtime,
-                    copy_stream,
+
+                resident, stats = (
+                    fetch_one_chunk(
+                        sample_dir,
+                        meta,
+                        fmt,
+                        t,
+                        bandwidth_mbps,
+                        jitter_cv,
+                        rng,
+                        runtime,
+                        copy_stream,
+                    )
                 )
+
                 fetched[t] = resident
-                append_stats(fetch_total, stats)
+
+                append_stats(
+                    fetch_total,
+                    stats,
+                )
+
             if copy_stream is not None:
                 copy_stream.synchronize()
+
         except BaseException as exc:
             fetch_error.append(exc)
 
     device_synchronize(runtime)
+
     if runtime.is_cuda:
-        torch.cuda.reset_peak_memory_stats(runtime.device)
-    power = PowerSampler(enabled=runtime.is_cuda)
+        torch.cuda.reset_peak_memory_stats(
+            runtime.device
+        )
+
+    power = PowerSampler(
+        enabled=runtime.is_cuda
+    )
+
     power.start()
+
     request_start = time.perf_counter()
 
     thread = None
+
     if strategy != "local":
-        thread = threading.Thread(target=fetch_worker, daemon=True)
+        thread = threading.Thread(
+            target=fetch_worker,
+            daemon=True,
+        )
+
         thread.start()
 
     if strategy == "adaptive":
         assert state is not None
+
         while True:
             t = state.claim_compute()
+
             if t is None:
                 break
+
             local_cache = compute_one_chunk(
                 model,
                 record["prefill_ids"],
@@ -770,7 +992,9 @@ def run_request(
                 local_cache,
                 runtime,
             )
+
             local_chunks += 1
+
     else:
         for t in range(split):
             local_cache = compute_one_chunk(
@@ -781,76 +1005,205 @@ def run_request(
                 local_cache,
                 runtime,
             )
+
             local_chunks += 1
 
     if thread is not None:
         thread.join()
+
     if fetch_error:
         raise fetch_error[0]
 
-    context_cache = assemble_cache(local_cache, local_chunks, fetched, meta)
-    first, decode_cache = first_step(
-        model, int(record["seed_id"]), context_cache, runtime
+    context_cache = assemble_cache(
+        local_cache,
+        local_chunks,
+        fetched,
+        meta,
     )
+
+    first, decode_cache = first_step(
+        model,
+        int(record["seed_id"]),
+        context_cache,
+        runtime,
+    )
+
     device_synchronize(runtime)
-    ttft_ms = (time.perf_counter() - request_start) * 1000
+
+    ttft_ms = (
+        time.perf_counter()
+        - request_start
+    ) * 1000.0
+
     ttft_energy_j = power.stop()
 
     generated = continue_greedy(
         model,
         first,
         decode_cache,
-        max_new_tokens=max(1, quality_tokens),
+        max_new_tokens=max(
+            1,
+            quality_tokens,
+        ),
         eos=tokenizer.eos_token_id,
         runtime=runtime,
     )
-    prediction = tokenizer.decode(generated, skip_special_tokens=True).strip()
+
+    prediction = tokenizer.decode(
+        generated,
+        skip_special_tokens=True,
+    ).strip()
+
     return {
         "strategy": strategy,
         "format": fmt,
+
         "ttft_ms": ttft_ms,
-        "ttft_energy_j": ttft_energy_j,
-        "local_chunks": local_chunks,
-        "fetched_chunks": len(fetched),
-        "wire_bytes": fetch_total.wire_bytes,
-        "disk_ms": fetch_total.disk_ms,
-        "wire_ms": fetch_total.wire_ms,
-        "decode_ms": fetch_total.decode_ms,
+
+        "ttft_energy_j": (
+            ttft_energy_j
+        ),
+
+        "local_chunks": (
+            local_chunks
+        ),
+
+        "fetched_chunks": (
+            len(fetched)
+        ),
+
+        "wire_bytes": (
+            fetch_total.wire_bytes
+        ),
+
+        "disk_ms": (
+            fetch_total.disk_ms
+        ),
+
+        "wire_ms": (
+            fetch_total.wire_ms
+        ),
+
+        "decode_ms": (
+            fetch_total.decode_ms
+        ),
+
         "peak_vram_mib": (
-            torch.cuda.max_memory_allocated(runtime.device) / 2**20
+            torch.cuda.max_memory_allocated(
+                runtime.device
+            )
+            / 2**20
             if runtime.is_cuda
             else 0.0
         ),
-        "rss_mib": psutil.Process().memory_info().rss / 2**20,
-        "runtime_device": str(runtime.device),
-        "runtime_dtype": str(runtime.dtype).removeprefix("torch."),
-        "runtime_backend": runtime.backend,
+
+        "rss_mib": (
+            psutil.Process()
+            .memory_info()
+            .rss
+            / 2**20
+        ),
+
+        "runtime_device": str(
+            runtime.device
+        ),
+
+        "runtime_dtype": (
+            str(runtime.dtype)
+            .removeprefix("torch.")
+        ),
+
+        "runtime_backend": (
+            runtime.backend
+        ),
+
         "prediction": prediction,
-        "f1": qa_f1(prediction, record["answers"]),
+
+        "f1": qa_f1(
+            prediction,
+            record["answers"],
+        ),
     }
 
 
 def run(args: argparse.Namespace) -> None:
-    records = torch.load(args.prepared, map_location="cpu", weights_only=False)
-    model, tokenizer, runtime = load_model(
-        args.model, args.device, args.cpu_dtype
+    records = torch.load(
+        args.prepared,
+        map_location="cpu",
+        weights_only=False,
     )
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
 
-    # Kernel/model warm-up; this is intentionally outside TTFT.
-    warm = torch.tensor(
-        [[1, 2, 3, 4]], dtype=torch.long, device=runtime.device
+    model, tokenizer, runtime = (
+        load_model(
+            args.model,
+            args.device,
+            args.cpu_dtype,
+        )
     )
+
+    output = Path(args.output)
+
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    if "sparkv" in args.strategies:
+        if args.schedule is None:
+            raise ValueError(
+                "--schedule is required "
+                "when 'sparkv' is included "
+                "in --strategies"
+            )
+
+        schedule_path = Path(
+            args.schedule
+        )
+
+        if not schedule_path.is_file():
+            raise FileNotFoundError(
+                "SparKV schedule not found: "
+                f"{schedule_path}"
+            )
+
+    # Kernel/model warm-up.
+    # TTFT 측정에서는 제외한다.
+    warm = torch.tensor(
+        [[1, 2, 3, 4]],
+        dtype=torch.long,
+        device=runtime.device,
+    )
+
     with torch.inference_mode():
-        model(input_ids=warm, use_cache=True, logits_to_keep=1)
+        model(
+            input_ids=warm,
+            use_cache=True,
+            logits_to_keep=1,
+        )
+
     device_synchronize(runtime)
 
-    with output.open("w", encoding="utf-8") as handle:
-        for sample_idx, record in enumerate(records[: args.samples]):
-            sample_dir = Path(args.cache_root) / args.format / f"sample_{sample_idx:03d}"
+    with output.open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+
+        for sample_idx, record in enumerate(
+            records[: args.samples]
+        ):
+
+            sample_dir = (
+                Path(args.cache_root)
+                / args.format
+                / f"sample_{sample_idx:03d}"
+            )
+
             for strategy in args.strategies:
-                for repeat in range(args.repeats):
+
+                for repeat in range(
+                    args.repeats
+                ):
+
                     result = run_request(
                         model=model,
                         tokenizer=tokenizer,
@@ -860,24 +1213,71 @@ def run(args: argparse.Namespace) -> None:
                         fmt=args.format,
                         strategy=strategy,
                         split=args.split,
-                        bandwidth_mbps=args.bandwidth_mbps,
-                        jitter_cv=args.jitter_cv,
-                        quality_tokens=args.quality_tokens if repeat == 0 else 1,
-                        rng_seed=args.seed + sample_idx * 1000 + repeat,
+                        bandwidth_mbps=(
+                            args.bandwidth_mbps
+                        ),
+                        jitter_cv=(
+                            args.jitter_cv
+                        ),
+                        quality_tokens=(
+                            args.quality_tokens
+                            if repeat == 0
+                            else 1
+                        ),
+                        rng_seed=(
+                            args.seed
+                            + sample_idx * 1000
+                            + repeat
+                        ),
+                        schedule_path=(
+                            args.schedule
+                        ),
                     )
+
                     result.update(
                         {
-                            "sample_index": sample_idx,
-                            "sample_id": record["sample_id"],
+                            "sample_index": (
+                                sample_idx
+                            ),
+
+                            "sample_id": (
+                                record[
+                                    "sample_id"
+                                ]
+                            ),
+
                             "repeat": repeat,
-                            "bandwidth_mbps": args.bandwidth_mbps,
-                            "jitter_cv": args.jitter_cv,
+
+                            "bandwidth_mbps": (
+                                args.bandwidth_mbps
+                            ),
+
+                            "jitter_cv": (
+                                args.jitter_cv
+                            ),
                         }
                     )
-                    handle.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+                    handle.write(
+                        json.dumps(
+                            result,
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+
                     handle.flush()
-                    print(json.dumps(result, ensure_ascii=False))
-                    clear_device_cache(runtime)
+
+                    print(
+                        json.dumps(
+                            result,
+                            ensure_ascii=False,
+                        )
+                    )
+
+                    clear_device_cache(
+                        runtime
+                    )
 
 
 def profile(args: argparse.Namespace) -> None:
@@ -1028,7 +1428,13 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--strategies",
         nargs="+",
-        choices=["local", "fetch", "static", "adaptive"],
+        choices=[
+            "local",
+            "fetch",
+            "static",
+            "adaptive",
+            "sparkv",
+        ],
         default=["local", "fetch", "static", "adaptive"],
     )
     p.add_argument("--split", type=int, default=4)
@@ -1038,6 +1444,14 @@ def make_parser() -> argparse.ArgumentParser:
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--quality-tokens", type=int, default=32)
     p.add_argument("--seed", type=int, default=2026)
+    p.add_argument(
+        "--schedule",
+        default=None,
+        help=(
+            "Potential-aware SparKV schedule JSON. "
+            "Required when strategy 'sparkv' is used."
+        ),
+    )
     p.add_argument("--output", required=True)
     add_runtime_arguments(p)
     p.set_defaults(func=run)
