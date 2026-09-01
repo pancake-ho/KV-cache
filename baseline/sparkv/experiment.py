@@ -285,6 +285,7 @@ def _generate_first_token(
     model: Any,
     tokenizer: Any,
     cache: Any,
+    prefill_ids: list[int],
     seed_id: int,
     runtime: Any,
 ) -> tuple[
@@ -295,30 +296,56 @@ def _generate_first_token(
         cache.get_seq_length()
     )
 
-    current = torch.tensor(
-        [[seed_id]],
+    # transformers==4.51.3 derives cache_position from the complete logical
+    # input_ids sequence and then removes the prefix already represented by
+    # past_key_values. Passing only [[seed_id]] with a non-empty cache makes
+    # cache_position empty and crashes prepare_inputs_for_generation().
+    #
+    # Keep the SparKV-reconstructed DynamicCache, but pass the complete
+    # logical prompt. Hugging Face then slices input_ids internally and
+    # forwards only the single uncached seed token.
+    if len(prefill_ids) != past_len:
+        raise RuntimeError(
+            "SparKV prefill/cache length mismatch before generate(): "
+            f"prefill_ids={len(prefill_ids)}, "
+            f"cache_seq_length={past_len}"
+        )
+
+    logical_ids = [
+        int(token_id)
+        for token_id in prefill_ids
+    ]
+    logical_ids.append(
+        int(seed_id)
+    )
+
+    input_ids = torch.tensor(
+        [logical_ids],
         dtype=torch.long,
         device=runtime.device,
     )
 
-    attention_mask = torch.ones(
-        (
-            1,
-            past_len + 1,
-        ),
+    attention_mask = torch.ones_like(
+        input_ids,
         dtype=torch.long,
-        device=runtime.device,
     )
 
     with torch.inference_mode():
         generated = model.generate(
-            input_ids=current,
+            input_ids=input_ids,
             attention_mask=(
                 attention_mask
             ),
             past_key_values=cache,
             max_new_tokens=1,
             do_sample=False,
+
+            # Qwen3 generation_config contains sampling-only defaults.
+            # They are irrelevant for greedy generation.
+            temperature=None,
+            top_p=None,
+            top_k=None,
+
             use_cache=True,
             return_dict_in_generate=True,
             pad_token_id=(
@@ -355,6 +382,30 @@ def _generate_first_token(
             "SparKV integration requires "
             "cache injection into generate()."
         )
+
+    # max_new_tokens=1에서 generate()의 첫 forward가 seed token을
+    # cache에 추가했는지 확인한다. 생성된 first_token 자체는 아직
+    # forward되지 않았으므로 decode cache 길이는 past_len + 1이어야 한다.
+    if hasattr(
+        decode_cache,
+        "get_seq_length",
+    ):
+        decode_len = int(
+            decode_cache.get_seq_length()
+        )
+        expected_decode_len = (
+            past_len + 1
+        )
+
+        if decode_len != (
+            expected_decode_len
+        ):
+            raise RuntimeError(
+                "Unexpected cache length after "
+                "first-token generate(): "
+                f"expected={expected_decode_len}, "
+                f"got={decode_len}"
+            )
 
     return (
         first_token,
@@ -529,6 +580,12 @@ def run_command(
                     model=model,
                     tokenizer=tokenizer,
                     cache=cache,
+                    prefill_ids=[
+                        int(x)
+                        for x in record[
+                            "prefill_ids"
+                        ]
+                    ],
                     seed_id=int(
                         record[
                             "seed_id"
