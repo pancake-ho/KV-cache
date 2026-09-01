@@ -9,3 +9,4 @@ psutil==7.0.0
 nvidia-ml-py==12.570.86
 pytest==8.3.5
 bitarray
+einops

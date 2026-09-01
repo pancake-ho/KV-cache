@@ -748,9 +748,43 @@ def _profile_dense_and_projection(
             )
 
             # t_o + residual + norm + FFN.
-            dummy_attention = torch.zeros_like(
-                hidden
+            #
+            # Qwen3 does not require the concatenated attention width before o_proj
+            # to equal hidden_size.  In Qwen3-4B, for example:
+            #
+            #   hidden_size             = 2560
+            #   num_attention_heads     = 32
+            #   head_dim                = 128
+            #   o_proj input width      = 32 * 128 = 4096
+            #
+            # Therefore zeros_like(hidden) is invalid here.  Build a synthetic
+            # attention output using the actual o_proj input geometry instead.
+            attention_width = int(
+                layer.self_attn.o_proj.in_features
             )
+
+            if (
+                int(
+                    layer.self_attn.o_proj.out_features
+                )
+                != int(
+                    hidden.shape[-1]
+                )
+            ):
+                raise RuntimeError(
+                    "Qwen3 o_proj output width does not match hidden size: "
+                    f"o_proj.out_features="
+                    f"{layer.self_attn.o_proj.out_features}, "
+                    f"hidden_size={hidden.shape[-1]}"
+                )
+
+            dummy_attention = hidden.new_zeros(
+                (
+                    *hidden.shape[:-1],
+                    attention_width,
+                )
+            )
+
             after_attn = (
                 residual
                 + layer.self_attn.o_proj(

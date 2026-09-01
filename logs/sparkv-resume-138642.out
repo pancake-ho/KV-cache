@@ -1,0 +1,23 @@
+utc_start=2026-09-01T07:09:04Z
+resume_job_id=138642
+source_job_id=138634
+branch=exp/sparkv-test
+commit=18edbd4e9006cc5d8f4905eaff96518b65f86a2c
+dirty=1
+delta_ms_spec=auto
+bandwidth_mbps=640
+....................                                                     [100%]
+20 passed in 9.73s
+[6/8] Generate potential-aware SparKV schedules
+{
+  "saved": "/data/surt321/repos/lab/kv_cache/results/sparkv/resume-138634-to-138642/schedules/sample_000.json",
+  "delta_ms": 180.73748265380263,
+  "delta_mode": "auto-safe-stream-bound",
+  "makespan_ms": 70202.45422316458,
+  "compute_chunks": 355,
+  "stream_chunks": 1949,
+  "stages": 430
+}
+[7/8] Direct SparKV execution
+Warning: Sage2++ NOT enabled
+{"model_runtime": {"device": "cuda:0", "dtype": "bfloat16", "backend": "cuda-nf4"}}
