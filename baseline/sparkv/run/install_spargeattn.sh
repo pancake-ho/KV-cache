@@ -76,7 +76,52 @@ git -C "${TARGET}" checkout \
 python -m pip install \
     -r baseline/sparkv/requirements.txt
 
+# SpargeAttention CUDA extension build dependency.
+python -m pip install ninja
+
+echo "[INFO] Checking CUDA build environment"
+
+python - <<'PY'
+import torch
+from torch.utils.cpp_extension import CUDA_HOME
+
+print("torch:", torch.__version__)
+print("torch CUDA:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+print("CUDA_HOME:", CUDA_HOME)
+
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA is unavailable on this compute node")
+
+major, minor = torch.cuda.get_device_capability(0)
+print("GPU:", torch.cuda.get_device_name(0))
+print("compute capability:", (major, minor))
+
+if (major, minor) not in {
+    (8, 0),
+    (8, 6),
+    (8, 7),
+}:
+    raise SystemExit(
+        f"Current SparKV SpargeAttention wrapper expects Ampere; "
+        f"got sm{major}{minor}"
+    )
+
+if CUDA_HOME is None:
+    raise SystemExit(
+        "CUDA_HOME is unavailable. "
+        "A CUDA toolkit with nvcc is required to build SpargeAttention."
+    )
+PY
+
+command -v nvcc
+nvcc --version
+
+# SpargeAttention setup.py imports torch while configuring the extension.
+# Build isolation would hide the torch already installed in the lab env.
 python -m pip install \
+    --no-build-isolation \
+    -v \
     -e "${TARGET}"
 
 python - <<'PY'

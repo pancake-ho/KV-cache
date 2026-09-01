@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/data/surt321/anaconda3/envs/lab/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/data/surt321/anaconda3/envs/lab/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/data/surt321/repos/lab/kv_cache/baseline/sparkv/experiment.py", line 27, in <module>
+    from baseline.sparkv.artifacts import (
+  File "/data/surt321/repos/lab/kv_cache/baseline/sparkv/artifacts.py", line 18, in <module>
+    from baseline.sparkv.experiment import (
+  File "/data/surt321/repos/lab/kv_cache/baseline/sparkv/experiment.py", line 27, in <module>
+    from baseline.sparkv.artifacts import (
+ImportError: cannot import name 'build_cloud_cache' from partially initialized module 'baseline.sparkv.artifacts' (most likely due to a circular import) (/data/surt321/repos/lab/kv_cache/baseline/sparkv/artifacts.py)
+[ERROR] line=248 exit=1
+[ERROR] local workdir preserved: /local_datasets/surt321/sparkv-direct/138631
