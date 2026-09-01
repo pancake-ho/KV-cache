@@ -29,23 +29,22 @@ readonly BANDWIDTH_MBPS="${BANDWIDTH_MBPS:-640}"
 readonly JITTER_CV="${JITTER_CV:-0.0}"
 readonly SEED="${SEED:-2026}"
 
-# Paper states 1024-token chunks, but does not disclose Delta t.
+# Paper states 1024-token chunks but does not disclose Delta t.
 readonly DELTA_MS="${DELTA_MS:-5.0}"
 
-# Motivation explicitly evaluates 5-bit + Huffman.
-# Implementation states layer-wise non-uniform quantization but does not
-# disclose the layer bit allocation.  Set a comma-separated layer bit plan
-# here if you have the authors' allocation.
+# The paper motivation explicitly evaluates 5-bit + Huffman.
+# If an author-provided layer-wise allocation becomes available, supply a
+# comma-separated per-layer bit plan instead of the uniform fallback.
 readonly LAYER_BITS="${LAYER_BITS:-5}"
 
-# Paper specifies sliding-window adaptation and a per-stage migration limit,
-# but does not disclose these numerical values.
+# Paper describes sliding-window runtime adaptation but does not disclose
+# these numerical controller values.
 readonly RUNTIME_WINDOW="${RUNTIME_WINDOW:-4}"
 readonly IMBALANCE_MARGIN="${IMBALANCE_MARGIN:-0.05}"
 readonly MAX_MIGRATIONS="${MAX_MIGRATIONS:-4}"
 
-# Paper specifies MLP 48/24, 6000 samples, 80/20, SGD, MSE.
-# LR / momentum / epoch count are not reported.
+# Paper specifies 3-48-24-1, 6000 samples, 80/20, SGD, MSE.
+# LR / momentum / epoch count are not disclosed.
 readonly PRED_EPOCHS="${PRED_EPOCHS:-400}"
 readonly PRED_LR="${PRED_LR:-0.01}"
 readonly PRED_MOMENTUM="${PRED_MOMENTUM:-0.9}"
@@ -116,6 +115,11 @@ fi
 
 if (( PREPARED_SAMPLES < EVAL_SAMPLES )); then
     echo "[ERROR] PREPARED_SAMPLES must be >= EVAL_SAMPLES." >&2
+    exit 2
+fi
+
+if (( PROFILE_RECORDS < 6000 )); then
+    echo "[ERROR] PROFILE_RECORDS must be >= 6000 for the configured paper MLP training set." >&2
     exit 2
 fi
 
@@ -213,25 +217,30 @@ if not torch.cuda.is_available():
     raise SystemExit("CUDA unavailable")
 
 major, minor = torch.cuda.get_device_capability(0)
-if f"sm{major}{minor}" not in {"sm80", "sm86", "sm87"}:
+arch = f"sm{major}{minor}"
+
+if arch not in {"sm80", "sm86", "sm87"}:
     raise SystemExit(
-        f"Direct SparKV wrapper expects Ampere sm80/sm86/sm87; got sm{major}{minor}"
+        "Direct SparKV wrapper expects the currently implemented "
+        f"Ampere path sm80/sm86/sm87; got {arch}"
     )
 
+print("bitarray:", getattr(bitarray, "__version__", "unknown"))
 print("SpargeAttention/CUDA preflight: OK")
 PY
 
 python -m py_compile \
-    baseline/sparkv/paper_codec.py \
-    baseline/sparkv/paper_sparge.py \
+    baseline/sparkv/runtime.py \
+    baseline/sparkv/codec.py \
+    baseline/sparkv/sparge.py \
     baseline/sparkv/overhead_model.py \
     baseline/sparkv/scheduler.py \
     baseline/sparkv/runtime_controller.py \
-    baseline/sparkv/paper_artifacts.py \
-    baseline/sparkv/paper_executor.py \
-    baseline/sparkv/paper_experiment.py \
-    baseline/sparkv/utils/validate_paper.py \
-    baseline/sparkv/utils/summarize_paper.py
+    baseline/sparkv/artifacts.py \
+    baseline/sparkv/executor.py \
+    baseline/sparkv/experiment.py \
+    baseline/sparkv/utils/validate_results.py \
+    baseline/sparkv/utils/summarize_results.py
 
 python -m pytest -q baseline/sparkv/tests
 
@@ -243,7 +252,7 @@ python -m baseline.sparkv.experiment prepare \
     --output "${PREPARED}"
 
 echo "[2/8] Build actual compressed cloud KV artifacts"
-python -m baseline.sparkv.paper_experiment build-cloud \
+python -m baseline.sparkv.experiment build-cloud \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
     --output-root "${CLOUD_ROOT}" \
@@ -255,8 +264,8 @@ python -m baseline.sparkv.paper_experiment build-cloud \
 du -sh "${CLOUD_ROOT}" \
     | tee "${RESULT_ROOT}/cloud_cache_size.txt"
 
-echo "[3/8] Collect 6000 sparse-attention profiling records"
-python -m baseline.sparkv.paper_experiment collect-overhead \
+echo "[3/8] Collect sparse-attention profiling records"
+python -m baseline.sparkv.experiment collect-overhead \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
     --output "${OVERHEAD_JSONL}" \
@@ -265,7 +274,7 @@ python -m baseline.sparkv.paper_experiment collect-overhead \
     --device cuda
 
 echo "[4/8] Train SparKV 3-48-24-1 computation-latency MLP"
-python -m baseline.sparkv.paper_experiment train-predictor \
+python -m baseline.sparkv.experiment train-predictor \
     --profiles "${OVERHEAD_JSONL}" \
     --profile-meta "${OVERHEAD_META}" \
     --output "${PREDICTOR}" \
@@ -278,12 +287,12 @@ echo "[5/8] Build per-sample stream + scheduler profiles"
 for ((i=0; i<EVAL_SAMPLES; i++)); do
     sample="$(printf 'sample_%03d' "${i}")"
 
-    python -m baseline.sparkv.paper_experiment profile-stream \
+    python -m baseline.sparkv.experiment profile-stream \
         --sample-dir "${CLOUD_ROOT}/${sample}" \
         --output "${STREAM_ROOT}/${sample}.json" \
         --dtype bfloat16
 
-    python -m baseline.sparkv.paper_experiment scheduler-profile \
+    python -m baseline.sparkv.experiment scheduler-profile \
         --model "${MODEL_ID}" \
         --prepared "${PREPARED}" \
         --sample-index "${i}" \
@@ -307,7 +316,7 @@ for ((i=0; i<EVAL_SAMPLES; i++)); do
 done
 
 echo "[7/8] Direct SparKV execution"
-python -m baseline.sparkv.paper_experiment run \
+python -m baseline.sparkv.experiment run \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
     --cloud-root "${CLOUD_ROOT}" \
@@ -325,11 +334,11 @@ python -m baseline.sparkv.paper_experiment run \
     --device cuda
 
 echo "[8/8] Validate and summarize"
-python baseline/sparkv/utils/validate_paper.py \
+python baseline/sparkv/utils/validate_results.py \
     "${RESULT_JSONL}" \
     | tee "${RESULT_ROOT}/validation.txt"
 
-python baseline/sparkv/utils/summarize_paper.py \
+python baseline/sparkv/utils/summarize_results.py \
     "${RESULT_JSONL}" \
     --output "${RESULT_ROOT}/summary.csv" \
     | tee "${RESULT_ROOT}/summary.txt"

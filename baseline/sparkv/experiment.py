@@ -9,13 +9,14 @@ from typing import Any
 import psutil
 import torch
 
-from baseline.sparkv.experiment import (
+from baseline.sparkv.runtime import (
     MODEL_ID,
     PowerSampler,
     clear_device_cache,
     continue_greedy,
     device_synchronize,
     load_model,
+    prepare_command,
     qa_f1,
     seed_everything,
 )
@@ -53,6 +54,7 @@ def build_cloud_command(
     records = _load_records(
         args.prepared
     )
+
     result = build_cloud_cache(
         records=records,
         model_id=args.model,
@@ -61,11 +63,13 @@ def build_cloud_command(
         ),
         samples=args.samples,
         chunk_size=args.chunk_size,
-        layer_bits_spec=
-            args.layer_bits,
+        layer_bits_spec=(
+            args.layer_bits
+        ),
         device=args.device,
         cpu_dtype=args.cpu_dtype,
     )
+
     print(
         json.dumps(
             result,
@@ -77,13 +81,14 @@ def build_cloud_command(
 def profile_stream_command(
     args: argparse.Namespace,
 ) -> None:
-    device = torch.device(
-        "cuda:0"
-    )
     if not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA required"
         )
+
+    device = torch.device(
+        "cuda:0"
+    )
 
     result = (
         profile_stream_processing(
@@ -102,6 +107,7 @@ def profile_stream_command(
             device=device,
         )
     )
+
     print(
         json.dumps(
             {
@@ -129,18 +135,25 @@ def collect_overhead_command(
     records = _load_records(
         args.prepared
     )
-    result = collect_predictor_profile(
-        records=records,
-        model_id=args.model,
-        output=Path(
-            args.output
-        ),
-        chunk_size=args.chunk_size,
-        target_records=
-            args.target_records,
-        device=args.device,
-        cpu_dtype=args.cpu_dtype,
+
+    result = (
+        collect_predictor_profile(
+            records=records,
+            model_id=args.model,
+            output=Path(
+                args.output
+            ),
+            chunk_size=(
+                args.chunk_size
+            ),
+            target_records=(
+                args.target_records
+            ),
+            device=args.device,
+            cpu_dtype=args.cpu_dtype,
+        )
     )
+
     print(
         json.dumps(
             result,
@@ -153,12 +166,19 @@ def train_predictor_command(
     args: argparse.Namespace,
 ) -> None:
     records = []
-    for profile in args.profiles:
-        with Path(profile).open(
+
+    for profile in (
+        args.profiles
+    ):
+        with Path(
+            profile
+        ).open(
             encoding="utf-8"
         ) as handle:
             records.extend(
-                json.loads(line)
+                json.loads(
+                    line
+                )
                 for line in handle
                 if line.strip()
             )
@@ -176,13 +196,18 @@ def train_predictor_command(
         output=Path(
             args.output
         ),
-        config=PredictorTrainConfig(
-            seed=args.seed,
-            samples=6000,
-            epochs=args.epochs,
-            learning_rate=
-                args.learning_rate,
-            momentum=args.momentum,
+        config=(
+            PredictorTrainConfig(
+                seed=args.seed,
+                samples=6000,
+                epochs=args.epochs,
+                learning_rate=(
+                    args.learning_rate
+                ),
+                momentum=(
+                    args.momentum
+                ),
+            )
         ),
         dense_ms=float(
             meta[
@@ -195,6 +220,7 @@ def train_predictor_command(
             ]
         ),
     )
+
     print(
         json.dumps(
             result,
@@ -219,10 +245,9 @@ def scheduler_profile_command(
             sample_dir=Path(
                 args.sample_dir
             ),
-            stream_profile_path=
-                Path(
-                    args.stream_profile
-                ),
+            stream_profile_path=Path(
+                args.stream_profile
+            ),
             predictor_path=Path(
                 args.predictor
             ),
@@ -230,11 +255,11 @@ def scheduler_profile_command(
             output=Path(
                 args.output
             ),
-            chunk_size=
-                args.chunk_size,
+            chunk_size=(
+                args.chunk_size
+            ),
             device=args.device,
-            cpu_dtype=
-                args.cpu_dtype,
+            cpu_dtype=args.cpu_dtype,
         )
     )
 
@@ -288,19 +313,25 @@ def _generate_first_token(
     with torch.inference_mode():
         generated = model.generate(
             input_ids=current,
-            attention_mask=
-                attention_mask,
+            attention_mask=(
+                attention_mask
+            ),
             past_key_values=cache,
             max_new_tokens=1,
             do_sample=False,
             use_cache=True,
-            return_dict_in_generate=
-                True,
+            return_dict_in_generate=True,
             pad_token_id=(
                 tokenizer.pad_token_id
-                if tokenizer.pad_token_id
-                is not None
-                else tokenizer.eos_token_id
+                if (
+                    tokenizer
+                    .pad_token_id
+                    is not None
+                )
+                else (
+                    tokenizer
+                    .eos_token_id
+                )
             ),
         )
 
@@ -316,10 +347,13 @@ def _generate_first_token(
         "past_key_values",
         None,
     )
+
     if decode_cache is None:
         raise RuntimeError(
-            "transformers generate() did not return past_key_values; "
-            "the paper integration requires cache injection into generate()."
+            "transformers generate() did not "
+            "return past_key_values; the "
+            "SparKV integration requires "
+            "cache injection into generate()."
         )
 
     return (
@@ -335,6 +369,15 @@ def run_command(
         args.prepared
     )
 
+    if len(records) < (
+        args.samples
+    ):
+        raise ValueError(
+            "prepared sample count is "
+            f"{len(records)}, but "
+            f"--samples={args.samples}"
+        )
+
     model, tokenizer, runtime = (
         load_model(
             args.model,
@@ -345,7 +388,8 @@ def run_command(
 
     if not runtime.is_cuda:
         raise RuntimeError(
-            "Paper SparKV run must not fall back to CPU."
+            "SparKV paper run must not "
+            "fall back to CPU."
         )
 
     output = Path(
@@ -356,18 +400,20 @@ def run_command(
         exist_ok=True,
     )
 
-    # Kernel warm-up is outside TTFT.
+    # Warm-up is outside the TTFT measurement.
     warm = torch.tensor(
         [[1, 2, 3, 4]],
         dtype=torch.long,
         device=runtime.device,
     )
+
     with torch.inference_mode():
         model(
             input_ids=warm,
             use_cache=True,
             logits_to_keep=1,
         )
+
     device_synchronize(
         runtime
     )
@@ -382,18 +428,44 @@ def run_command(
             record = records[
                 sample_idx
             ]
+
             sample_dir = (
                 Path(
                     args.cloud_root
                 )
-                / f"sample_{sample_idx:03d}"
+                / (
+                    f"sample_"
+                    f"{sample_idx:03d}"
+                )
             )
+
             schedule_path = (
                 Path(
                     args.schedule_root
                 )
-                / f"sample_{sample_idx:03d}.json"
+                / (
+                    f"sample_"
+                    f"{sample_idx:03d}.json"
+                )
             )
+
+            if not (
+                sample_dir
+                / "meta.json"
+            ).is_file():
+                raise FileNotFoundError(
+                    "missing cloud metadata: "
+                    f"{sample_dir / 'meta.json'}"
+                )
+
+            if not (
+                schedule_path
+                .is_file()
+            ):
+                raise FileNotFoundError(
+                    "missing schedule: "
+                    f"{schedule_path}"
+                )
 
             for repeat in range(
                 args.repeats
@@ -416,45 +488,53 @@ def run_command(
                         model=model,
                         record=record,
                         runtime=runtime,
-                        sample_dir=
-                            sample_dir,
-                        schedule_path=
-                            schedule_path,
-                        bandwidth_mbps=
-                            args.bandwidth_mbps,
-                        jitter_cv=
-                            args.jitter_cv,
+                        sample_dir=(
+                            sample_dir
+                        ),
+                        schedule_path=(
+                            schedule_path
+                        ),
+                        bandwidth_mbps=(
+                            args.bandwidth_mbps
+                        ),
+                        jitter_cv=(
+                            args.jitter_cv
+                        ),
                         seed=(
                             args.seed
                             + sample_idx
                             * 1000
                             + repeat
                         ),
-                        controller_config=
+                        controller_config=(
                             RuntimeControllerConfig(
-                                window=
-                                    args.runtime_window,
-                                imbalance_margin=
-                                    args.imbalance_margin,
-                                max_migrations_per_stage=
-                                    args.max_migrations_per_stage,
-                            ),
+                                window=(
+                                    args.runtime_window
+                                ),
+                                imbalance_margin=(
+                                    args.imbalance_margin
+                                ),
+                                max_migrations_per_stage=(
+                                    args.max_migrations_per_stage
+                                ),
+                            )
+                        ),
                     )
                 )
 
-                first_token, decode_cache = (
-                    _generate_first_token(
-                        model=model,
-                        tokenizer=
-                            tokenizer,
-                        cache=cache,
-                        seed_id=int(
-                            record[
-                                "seed_id"
-                            ]
-                        ),
-                        runtime=runtime,
-                    )
+                (
+                    first_token,
+                    decode_cache,
+                ) = _generate_first_token(
+                    model=model,
+                    tokenizer=tokenizer,
+                    cache=cache,
+                    seed_id=int(
+                        record[
+                            "seed_id"
+                        ]
+                    ),
+                    runtime=runtime,
                 )
 
                 device_synchronize(
@@ -462,9 +542,12 @@ def run_command(
                 )
 
                 ttft_ms = (
-                    time.perf_counter()
-                    - request_begin
-                ) * 1000.0
+                    (
+                        time.perf_counter()
+                        - request_begin
+                    )
+                    * 1000.0
+                )
 
                 ttft_energy_j = (
                     power.stop()
@@ -487,19 +570,22 @@ def run_command(
                             runtime=runtime,
                         )
                     )
+
                     prediction = (
                         tokenizer.decode(
                             generated,
-                            skip_special_tokens=
-                                True,
-                        ).strip()
+                            skip_special_tokens=True,
+                        )
+                        .strip()
                     )
+
                     f1 = qa_f1(
                         prediction,
                         record[
                             "answers"
                         ],
                     )
+
                 else:
                     prediction = ""
                     f1 = None
@@ -510,7 +596,11 @@ def run_command(
                     "strategy":
                         "sparkv",
                     "paper_algorithm":
-                        "potential-aware-greedy+mlp+runtime-controller",
+                        (
+                            "potential-aware-greedy"
+                            "+mlp"
+                            "+runtime-controller"
+                        ),
                     "sample_index":
                         sample_idx,
                     "sample_id":
@@ -565,12 +655,16 @@ def run_command(
                     "imbalance_margin":
                         args.imbalance_margin,
                     "max_migrations_per_stage":
-                        args.max_migrations_per_stage,
+                        (
+                            args
+                            .max_migrations_per_stage
+                        ),
                     "schedule_path":
                         str(
                             schedule_path
                         ),
                 }
+
                 result.update(
                     exec_stats.to_dict()
                 )
@@ -595,6 +689,7 @@ def run_command(
                     cache,
                     decode_cache,
                 )
+
                 clear_device_cache(
                     runtime
                 )
@@ -612,6 +707,7 @@ def add_runtime_args(
         ],
         default="cuda",
     )
+
     parser.add_argument(
         "--cpu-dtype",
         choices=[
@@ -623,10 +719,38 @@ def add_runtime_args(
 
 
 def make_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+    parser = (
+        argparse.ArgumentParser()
+    )
+
     sub = parser.add_subparsers(
         dest="command",
         required=True,
+    )
+
+    p = sub.add_parser(
+        "prepare"
+    )
+    p.add_argument(
+        "--model",
+        default=MODEL_ID,
+    )
+    p.add_argument(
+        "--samples",
+        type=int,
+        default=4,
+    )
+    p.add_argument(
+        "--prompt-tokens",
+        type=int,
+        default=8193,
+    )
+    p.add_argument(
+        "--output",
+        required=True,
+    )
+    p.set_defaults(
+        func=prepare_command
     )
 
     p = sub.add_parser(
@@ -660,8 +784,7 @@ def make_parser() -> argparse.ArgumentParser:
     )
     add_runtime_args(p)
     p.set_defaults(
-        func=
-            build_cloud_command
+        func=build_cloud_command
     )
 
     p = sub.add_parser(
@@ -684,8 +807,7 @@ def make_parser() -> argparse.ArgumentParser:
         default="bfloat16",
     )
     p.set_defaults(
-        func=
-            profile_stream_command
+        func=profile_stream_command
     )
 
     p = sub.add_parser(
@@ -715,8 +837,7 @@ def make_parser() -> argparse.ArgumentParser:
     )
     add_runtime_args(p)
     p.set_defaults(
-        func=
-            collect_overhead_command
+        func=collect_overhead_command
     )
 
     p = sub.add_parser(
@@ -756,8 +877,7 @@ def make_parser() -> argparse.ArgumentParser:
         default=0.9,
     )
     p.set_defaults(
-        func=
-            train_predictor_command
+        func=train_predictor_command
     )
 
     p = sub.add_parser(
@@ -799,8 +919,7 @@ def make_parser() -> argparse.ArgumentParser:
     )
     add_runtime_args(p)
     p.set_defaults(
-        func=
-            scheduler_profile_command
+        func=scheduler_profile_command
     )
 
     p = sub.add_parser(
@@ -857,7 +976,7 @@ def make_parser() -> argparse.ArgumentParser:
         default=2026,
     )
 
-    # Paper does not disclose these numerical runtime-controller values.
+    # Paper does not disclose these numerical controller values.
     p.add_argument(
         "--runtime-window",
         type=int,
@@ -885,6 +1004,7 @@ def make_parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     parser = make_parser()
     args = parser.parse_args()
+
     seed_everything(
         getattr(
             args,
@@ -892,6 +1012,7 @@ if __name__ == "__main__":
             2026,
         )
     )
+
     args.func(
         args
     )
