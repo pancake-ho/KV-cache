@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-#SBATCH --job-name=sparkv-auto-smoke
+#SBATCH --job-name=sparkv-run
 #SBATCH --partition=batch_eebme_ugrad
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-gpu=16
 #SBATCH --mem-per-gpu=29G
 #SBATCH --time=1-0
-#SBATCH --output=logs/sparkv-auto-smoke-%j.out
-#SBATCH --error=logs/sparkv-auto-smoke-%j.err
+#SBATCH --output=logs/sparkv-run-%j.out
+#SBATCH --error=logs/sparkv-run-%j.err
 
 set -Eeuo pipefail
 
@@ -24,15 +24,10 @@ readonly JITTER_CV="${JITTER_CV:-0.0}"
 readonly SPLIT="${SPLIT:-4}"
 readonly SEED="${SEED:-2026}"
 
-# Directory from which sbatch was submitted.
 readonly SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 
-# Resolve the KV-cache repository root regardless of the submission
-# location inside the repository.
 REPO_ROOT="$(git -C "${SUBMIT_DIR}" rev-parse --show-toplevel 2>/dev/null)" || {
-    echo "[ERROR] Could not locate the Git repository root from:" >&2
-    echo "[ERROR]   ${SUBMIT_DIR}" >&2
-    echo "[ERROR] Submit this job from somewhere inside the KV-cache repository." >&2
+    echo "[ERROR] Could not locate the Git repository root from ${SUBMIT_DIR}" >&2
     exit 2
 }
 readonly REPO_ROOT
@@ -43,6 +38,8 @@ readonly CACHE_ROOT="${LOCAL_ROOT}/cache"
 readonly PREPARED="${LOCAL_ROOT}/prepared_triviaqa.pt"
 readonly RESULT_ROOT="${REPO_ROOT}/results/sparkv/smoke-${JOB_ID}"
 readonly PROFILE_JSON="${RESULT_ROOT}/profile.json"
+readonly RAW_STREAM_PROFILE="${RESULT_ROOT}/stream_profile_raw.json"
+readonly Q5_STREAM_PROFILE="${RESULT_ROOT}/stream_profile_q5.json"
 
 JOB_SUCCEEDED=0
 
@@ -85,22 +82,23 @@ if (( SPLIT < 0 || SPLIT > NUM_CHUNKS )); then
     exit 2
 fi
 
-if [[ ! -f baseline/sparkv/experiment.py || ! -f baseline/sparkv/scheduler.py ]]; then
-    echo "[ERROR] Invalid KV-cache repository layout." >&2
-    echo "[ERROR] Detected repository root: ${REPO_ROOT}" >&2
-    echo "[ERROR] Expected:" >&2
-    echo "[ERROR]   ${REPO_ROOT}/baseline/sparkv/experiment.py" >&2
-    echo "[ERROR]   ${REPO_ROOT}/baseline/sparkv/scheduler.py" >&2
-    exit 2
-fi
+for required in \
+    baseline/sparkv/experiment.py \
+    baseline/sparkv/scheduler.py \
+    baseline/sparkv/executor.py \
+    baseline/sparkv/unit_cache.py \
+    baseline/sparkv/stream_profile.py; do
+    if [[ ! -f "${required}" ]]; then
+        echo "[ERROR] Missing required file: ${required}" >&2
+        exit 2
+    fi
+done
 
 if [[ "$(git branch --show-current)" != "${EXPECTED_BRANCH}" ]]; then
     echo "[ERROR] Expected branch '${EXPECTED_BRANCH}', found '$(git branch --show-current)'." >&2
     exit 2
 fi
 
-# Prefer the already activated environment inherited by sbatch. If it is not
-# active, initialize the user's Conda installation and activate lab explicitly.
 if [[ "${CONDA_DEFAULT_ENV:-}" != "lab" ]]; then
     CONDA_SH=""
     for candidate in \
@@ -121,7 +119,6 @@ if [[ "${CONDA_DEFAULT_ENV:-}" != "lab" ]]; then
         conda activate lab
     else
         echo "[ERROR] Conda environment 'lab' is not active and Conda was not found." >&2
-        echo "[ERROR] Run 'conda activate lab' before sbatch submission." >&2
         exit 3
     fi
 fi
@@ -159,73 +156,33 @@ mkdir -p "${HF_HOME}" "${HF_DATASETS_CACHE}"
     echo "jitter_cv=${JITTER_CV}"
     echo "split=${SPLIT}"
     echo "seed=${SEED}"
+    echo "p1=fine-grained-streaming"
 } | tee "${RESULT_ROOT}/run_manifest.txt"
 
 git status --short > "${RESULT_ROOT}/git_status.txt"
-if ! nvidia-smi --query-gpu=name,memory.total,driver_version \
-    --format=csv,noheader | tee "${RESULT_ROOT}/gpu.txt"; then
-    echo "[WARN] nvidia-smi failed; the experiment will try the CPU fallback." \
-        | tee -a "${RESULT_ROOT}/gpu.txt" >&2
-fi
+nvidia-smi --query-gpu=name,memory.total,driver_version \
+    --format=csv,noheader | tee "${RESULT_ROOT}/gpu.txt"
 python -m pip freeze > "${RESULT_ROOT}/pip_freeze.txt"
 
-python - <<'PY' | tee "${RESULT_ROOT}/preflight.txt"
-import json
-from importlib.metadata import version
-
-import torch
-
-packages = [
-    "torch",
-    "transformers",
-    "accelerate",
-    "bitsandbytes",
-    "datasets",
-    "safetensors",
-    "numpy",
-    "pandas",
-    "psutil",
-    "nvidia-ml-py",
-    "pytest",
-]
-installed = {}
-for package in packages:
-    try:
-        installed[package] = version(package)
-    except Exception as exc:
-        raise SystemExit(f"Required package is unavailable: {package}: {exc}") from exc
-
-print(json.dumps({
-    "packages": installed,
-    "cuda_available": torch.cuda.is_available(),
-    "cuda_version": torch.version.cuda,
-    "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-    "gpu_count": torch.cuda.device_count(),
-    "bf16_supported": (
-        torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False
-    ),
-}, indent=2))
-PY
-
-if ! python -m pip check | tee "${RESULT_ROOT}/pip_check.txt"; then
-    echo "[WARN] pip reported an environment conflict; continuing to the import/tests." >&2
-fi
 python -m py_compile \
     baseline/sparkv/experiment.py \
     baseline/sparkv/scheduler.py \
     baseline/sparkv/executor.py \
+    baseline/sparkv/unit_cache.py \
+    baseline/sparkv/stream_profile.py \
     baseline/sparkv/utils/validate_results.py \
     baseline/sparkv/utils/summarize_results.py
+
 python -m pytest -q baseline/sparkv/tests
 
-echo "[STEP 1/7] Preparing one LongBench/TriviaQA sample"
+echo "[STEP 1/9] Preparing LongBench/TriviaQA"
 python -m baseline.sparkv.experiment prepare \
     --model "${MODEL_ID}" \
     --samples "${SAMPLES}" \
     --prompt-tokens "${PROMPT_TOKENS}" \
     --output "${PREPARED}"
 
-echo "[STEP 2/7] Building raw and q5 KV-cache files"
+echo "[STEP 2/9] Building existing token-level raw/q5 cache"
 python -m baseline.sparkv.experiment build-cache \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
@@ -236,11 +193,18 @@ python -m baseline.sparkv.experiment build-cache \
     --device auto \
     --cpu-dtype float32
 
+echo "[STEP 3/9] Materializing true (t,l,h) stream units"
+for format in raw q5; do
+    python -m baseline.sparkv.unit_cache \
+        --sample-dir "${CACHE_ROOT}/${format}/sample_000" \
+        --format "${format}"
+done
+
 du -sh "${CACHE_ROOT}" | tee "${RESULT_ROOT}/cache_size.txt"
 cp "${CACHE_ROOT}/raw/sample_000/meta.json" "${RESULT_ROOT}/raw_meta.json"
 cp "${CACHE_ROOT}/q5/sample_000/meta.json" "${RESULT_ROOT}/q5_meta.json"
 
-echo "[STEP 3/7] Profiling per-chunk, per-layer compute time"
+echo "[STEP 4/9] Profiling local compute"
 python -m baseline.sparkv.experiment profile \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
@@ -250,30 +214,45 @@ python -m baseline.sparkv.experiment profile \
     --device auto \
     --cpu-dtype float32
 
-echo "[STEP 4/7] Generating offline scheduler outputs"
-for format in raw q5; do
-    python -m baseline.sparkv.scheduler \
-        --profile "${PROFILE_JSON}" \
-        --cache-meta "${CACHE_ROOT}/${format}/sample_000/meta.json" \
-        --bandwidth-mbps "${BANDWIDTH_MBPS}" \
-        --processing-ms 0.02 \
-        --delta-ms 5.0 \
-        --output "${RESULT_ROOT}/schedule_${format}.json"
-done
+echo "[STEP 5/9] Profiling per-unit stream processing"
+python -m baseline.sparkv.stream_profile \
+    --sample-dir "${CACHE_ROOT}/raw/sample_000" \
+    --format raw \
+    --output "${RAW_STREAM_PROFILE}" \
+    --device auto \
+    --dtype bfloat16
 
-echo "[STEP 5/7] Running raw-cache strategies including SparKV"
+python -m baseline.sparkv.stream_profile \
+    --sample-dir "${CACHE_ROOT}/q5/sample_000" \
+    --format q5 \
+    --output "${Q5_STREAM_PROFILE}" \
+    --device auto \
+    --dtype bfloat16
 
+echo "[STEP 6/9] Generating overhead-aware schedules"
+python -m baseline.sparkv.scheduler \
+    --profile "${PROFILE_JSON}" \
+    --cache-meta "${CACHE_ROOT}/raw/sample_000/meta.json" \
+    --stream-profile "${RAW_STREAM_PROFILE}" \
+    --bandwidth-mbps "${BANDWIDTH_MBPS}" \
+    --delta-ms 5.0 \
+    --output "${RESULT_ROOT}/schedule_raw.json"
+
+python -m baseline.sparkv.scheduler \
+    --profile "${PROFILE_JSON}" \
+    --cache-meta "${CACHE_ROOT}/q5/sample_000/meta.json" \
+    --stream-profile "${Q5_STREAM_PROFILE}" \
+    --bandwidth-mbps "${BANDWIDTH_MBPS}" \
+    --delta-ms 5.0 \
+    --output "${RESULT_ROOT}/schedule_q5.json"
+
+echo "[STEP 7/9] Running raw strategies including P1 SparKV"
 python -m baseline.sparkv.experiment run \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
     --cache-root "${CACHE_ROOT}" \
     --format raw \
-    --strategies \
-        local \
-        fetch \
-        static \
-        adaptive \
-        sparkv \
+    --strategies local fetch static adaptive sparkv \
     --split "${SPLIT}" \
     --bandwidth-mbps "${BANDWIDTH_MBPS}" \
     --jitter-cv "${JITTER_CV}" \
@@ -286,19 +265,13 @@ python -m baseline.sparkv.experiment run \
     --device auto \
     --cpu-dtype float32
 
-echo "[STEP 6/7] Running q5-cache strategies including SparKV"
-
+echo "[STEP 8/9] Running q5 strategies including P1 SparKV"
 python -m baseline.sparkv.experiment run \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
     --cache-root "${CACHE_ROOT}" \
     --format q5 \
-    --strategies \
-        local \
-        fetch \
-        static \
-        adaptive \
-        sparkv \
+    --strategies local fetch static adaptive sparkv \
     --split "${SPLIT}" \
     --bandwidth-mbps "${BANDWIDTH_MBPS}" \
     --jitter-cv "${JITTER_CV}" \
@@ -311,9 +284,10 @@ python -m baseline.sparkv.experiment run \
     --device auto \
     --cpu-dtype float32
 
-echo "[STEP 7/7] Validating raw equivalence and summarizing metrics"
+echo "[STEP 9/9] Validating and summarizing"
 python baseline/sparkv/utils/validate_results.py "${RESULT_ROOT}/raw.jsonl" \
     | tee "${RESULT_ROOT}/validation.txt"
+
 python baseline/sparkv/utils/summarize_results.py \
     "${RESULT_ROOT}/raw.jsonl" \
     "${RESULT_ROOT}/q5.jsonl" \
@@ -322,7 +296,8 @@ python baseline/sparkv/utils/summarize_results.py \
 
 echo "utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     | tee -a "${RESULT_ROOT}/run_manifest.txt"
-echo "[SUCCESS] SparKV smoke pipeline completed."
+
+echo "[SUCCESS] SparKV P1 smoke pipeline completed."
 echo "[SUCCESS] Persistent results: ${RESULT_ROOT}"
 
 JOB_SUCCEEDED=1
