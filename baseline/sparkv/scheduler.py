@@ -9,13 +9,43 @@ from typing import Any
 
 @dataclass(frozen=True, order=True)
 class Chunk:
+    """
+    SparKV chunk c=(t,l,h).
+
+    Python indices are zero-based:
+      t: token-chunk index
+      l: Transformer layer index
+      h: KV / attention-head partition index
+    """
     t: int
     layer: int
     head: int
 
+    @property
+    def key(self) -> str:
+        return (
+            f"{self.t}:"
+            f"{self.layer}:"
+            f"{self.head}"
+        )
+
 
 class SparKVScheduler:
-    """Potential-aware greedy scheduler used by the SparKV prototype."""
+    """
+    Direct implementation of Section IV-B's potential-aware greedy heuristic.
+
+    The scheduler keeps:
+      Qc: compute-ready and unfinished chunks
+      Qs: all unfinished chunks
+
+    Per stage:
+      1) sort Qc by wc and greedily compute under Delta t, re-evaluating
+         readiness / priority after every selected compute;
+      2) reset the budget to Delta t;
+      3) sort Qs by ws and greedily stream under the independent stream budget.
+
+    A chunk is processed exactly once.  Computing removes it from Qs.
+    """
 
     def __init__(
         self,
@@ -26,339 +56,739 @@ class SparKVScheduler:
         stream_ms: dict[Chunk, float],
         delta_ms: float,
     ) -> None:
-        if token_chunks <= 0 or layers <= 0 or heads <= 0:
-            raise ValueError("invalid scheduler geometry")
+        if (
+            token_chunks <= 0
+            or layers <= 0
+            or heads <= 0
+        ):
+            raise ValueError(
+                "invalid scheduler geometry"
+            )
         if delta_ms <= 0:
-            raise ValueError("delta_ms must be positive")
+            raise ValueError(
+                "delta_ms must be positive"
+            )
 
-        self.T = token_chunks
-        self.L = layers
-        self.H = heads
-        self.comp_ms = comp_ms
-        self.stream_ms = stream_ms
-        self.delta_ms = delta_ms
+        self.T = int(
+            token_chunks
+        )
+        self.L = int(layers)
+        self.H = int(heads)
+        self.delta_ms = float(
+            delta_ms
+        )
 
         self.all_chunks = {
-            Chunk(t, layer, head)
-            for t in range(self.T)
-            for layer in range(self.L)
-            for head in range(self.H)
+            Chunk(
+                t,
+                layer,
+                head,
+            )
+            for t in range(
+                self.T
+            )
+            for layer in range(
+                self.L
+            )
+            for head in range(
+                self.H
+            )
         }
-        self.done: dict[Chunk, str] = {}
 
-        if set(comp_ms) != self.all_chunks:
-            raise ValueError("comp_ms does not cover all scheduler units")
-        if set(stream_ms) != self.all_chunks:
-            raise ValueError("stream_ms does not cover all scheduler units")
+        self.comp_ms = dict(
+            comp_ms
+        )
+        self.stream_ms = dict(
+            stream_ms
+        )
 
-    def token_ready(self, c: Chunk, done: dict[Chunk, str]) -> bool:
-        if c.t == 0 or c.layer == self.L - 1:
+        if (
+            set(self.comp_ms)
+            != self.all_chunks
+        ):
+            raise ValueError(
+                "comp_ms geometry mismatch"
+            )
+        if (
+            set(self.stream_ms)
+            != self.all_chunks
+        ):
+            raise ValueError(
+                "stream_ms geometry mismatch"
+            )
+        if any(
+            value <= 0
+            for value in
+            self.comp_ms.values()
+        ):
+            raise ValueError(
+                "compute costs must be positive"
+            )
+        if any(
+            value <= 0
+            for value in
+            self.stream_ms.values()
+        ):
+            raise ValueError(
+                "stream costs must be positive"
+            )
+
+        self.done: dict[
+            Chunk,
+            str,
+        ] = {}
+
+    def reset(self) -> None:
+        self.done.clear()
+
+    def token_dependency_ready(
+        self,
+        c: Chunk,
+        done: dict[
+            Chunk,
+            str,
+        ],
+    ) -> bool:
+        # Eq. (4): t=1 or l=L are boundary cases.
+        if (
+            c.t == 0
+            or c.layer
+            == self.L - 1
+        ):
             return True
-        return Chunk(c.t - 1, c.layer, c.head) in done
 
-    def layer_ready(self, c: Chunk, done: dict[Chunk, str]) -> bool:
+        previous = Chunk(
+            c.t - 1,
+            c.layer,
+            c.head,
+        )
+        return previous in done
+
+    def layer_dependency_ready(
+        self,
+        c: Chunk,
+        done: dict[
+            Chunk,
+            str,
+        ],
+    ) -> bool:
+        # Eq. (5): l=1 has no lower-layer dependency.
         if c.layer == 0:
             return True
-        parent = Chunk(c.t, c.layer - 1, c.head)
-        return done.get(parent) == "compute"
+
+        previous_layer = Chunk(
+            c.t,
+            c.layer - 1,
+            c.head,
+        )
+        return (
+            done.get(
+                previous_layer
+            )
+            == "compute"
+        )
 
     def compute_ready(
         self,
         c: Chunk,
-        done: dict[Chunk, str] | None = None,
+        done: dict[
+            Chunk,
+            str,
+        ]
+        | None = None,
     ) -> bool:
-        done = self.done if done is None else done
+        state = (
+            self.done
+            if done is None
+            else done
+        )
         return (
-            c not in done
-            and self.token_ready(c, done)
-            and self.layer_ready(c, done)
+            c not in state
+            and self.token_dependency_ready(
+                c,
+                state,
+            )
+            and self.layer_dependency_ready(
+                c,
+                state,
+            )
         )
 
-    def children(self, c: Chunk, operation: str) -> set[Chunk]:
-        children: set[Chunk] = set()
-        if c.t + 1 < self.T and c.layer < self.L - 1:
-            children.add(Chunk(c.t + 1, c.layer, c.head))
-        if operation == "compute" and c.layer + 1 < self.L:
-            children.add(Chunk(c.t, c.layer + 1, c.head))
+    def _candidate_children(
+        self,
+        c: Chunk,
+    ) -> set[Chunk]:
+        children: set[
+            Chunk
+        ] = set()
+
+        # Horizontal dependency for the next token chunk.
+        if (
+            c.t + 1 < self.T
+            and c.layer
+            < self.L - 1
+        ):
+            children.add(
+                Chunk(
+                    c.t + 1,
+                    c.layer,
+                    c.head,
+                )
+            )
+
+        # Vertical dependency for the next layer.
+        if (
+            c.layer + 1
+            < self.L
+        ):
+            children.add(
+                Chunk(
+                    c.t,
+                    c.layer + 1,
+                    c.head,
+                )
+            )
+
         return children
 
-    def newly_unlocked(self, c: Chunk, operation: str) -> set[Chunk]:
+    def newly_compute_ready(
+        self,
+        c: Chunk,
+        operation: str,
+    ) -> set[Chunk]:
+        if operation not in {
+            "compute",
+            "stream",
+        }:
+            raise ValueError(
+                f"invalid operation: {operation}"
+            )
+
         before = {
             x
-            for x in self.children(c, operation)
-            if self.compute_ready(x)
+            for x in
+            self._candidate_children(
+                c
+            )
+            if self.compute_ready(
+                x,
+                self.done,
+            )
         }
-        after_done = dict(self.done)
-        after_done[c] = operation
+
+        after_state = dict(
+            self.done
+        )
+        after_state[c] = operation
+
         after = {
             x
-            for x in self.children(c, operation)
-            if self.compute_ready(x, after_done)
+            for x in
+            self._candidate_children(
+                c
+            )
+            if self.compute_ready(
+                x,
+                after_state,
+            )
         }
+
         return after - before
 
-    def compute_score(self, c: Chunk) -> float:
-        potential = sum(
-            1.0 / self.comp_ms[x]
-            for x in self.newly_unlocked(c, "compute")
+    def stream_priority(
+        self,
+        c: Chunk,
+    ) -> float:
+        unlocked = (
+            self.newly_compute_ready(
+                c,
+                "stream",
+            )
         )
-        return 1.0 / self.comp_ms[c] + potential
-
-    def stream_score(self, c: Chunk) -> float:
-        potential = sum(
-            1.0 / self.comp_ms[x]
-            for x in self.newly_unlocked(c, "stream")
+        return (
+            1.0
+            / self.stream_ms[c]
+            + sum(
+                1.0
+                / self.comp_ms[x]
+                for x in unlocked
+            )
         )
-        return 1.0 / self.stream_ms[c] + potential
 
-    @staticmethod
-    def select_with_budget(
-        candidates: list[Chunk],
-        costs: dict[Chunk, float],
-        budget: float,
-    ) -> list[Chunk]:
-        selected: list[Chunk] = []
+    def compute_priority(
+        self,
+        c: Chunk,
+    ) -> float:
+        if not self.compute_ready(
+            c
+        ):
+            return float("-inf")
+
+        unlocked = (
+            self.newly_compute_ready(
+                c,
+                "compute",
+            )
+        )
+        return (
+            1.0
+            / self.comp_ms[c]
+            + sum(
+                1.0
+                / self.comp_ms[x]
+                for x in unlocked
+            )
+        )
+
+    def _compute_phase(
+        self,
+    ) -> tuple[
+        list[Chunk],
+        float,
+    ]:
+        selected: list[
+            Chunk
+        ] = []
         used = 0.0
-        for c in candidates:
-            if used + costs[c] <= budget + 1e-9:
-                selected.append(c)
-                used += costs[c]
-        return selected
 
-    def run(self) -> dict[str, Any]:
-        stages: list[dict[str, Any]] = []
-        makespan_ms = 0.0
-        stage_id = 0
-
-        while len(self.done) < len(self.all_chunks):
-            stage_id += 1
-            compute_selected: list[Chunk] = []
-            compute_used = 0.0
-
-            while True:
-                ready = [
-                    c for c in self.all_chunks
-                    if self.compute_ready(c)
-                ]
-                ready.sort(key=lambda c: (-self.compute_score(c), c))
-
-                fitting = [
+        while True:
+            qc = [
+                c
+                for c in
+                self.all_chunks
+                if self.compute_ready(
                     c
-                    for c in ready
-                    if (
-                        compute_used + self.comp_ms[c]
-                        <= self.delta_ms + 1e-9
-                    )
-                ]
-                if not fitting:
-                    break
-
-                c = fitting[0]
-                self.done[c] = "compute"
-                compute_selected.append(c)
-                compute_used += self.comp_ms[c]
-
-            remaining = [
-                c for c in self.all_chunks
-                if c not in self.done
+                )
             ]
-            remaining.sort(key=lambda c: (-self.stream_score(c), c))
-
-            stream_selected = self.select_with_budget(
-                remaining,
-                self.stream_ms,
-                self.delta_ms,
+            qc.sort(
+                key=lambda c: (
+                    -self.compute_priority(
+                        c
+                    ),
+                    self.comp_ms[c],
+                    c,
+                )
             )
-            stream_used = sum(
-                self.stream_ms[c]
-                for c in stream_selected
+
+            fitting = [
+                c
+                for c in qc
+                if (
+                    used
+                    + self.comp_ms[c]
+                    <= self.delta_ms
+                    + 1e-9
+                )
+            ]
+
+            if not fitting:
+                break
+
+            c = fitting[0]
+            self.done[c] = "compute"
+            selected.append(c)
+            used += self.comp_ms[c]
+
+            # Qc is deliberately reconstructed and re-sorted on the next
+            # iteration because this compute may unlock more chunks.
+
+        return selected, used
+
+    def _stream_phase(
+        self,
+    ) -> tuple[
+        list[Chunk],
+        float,
+    ]:
+        qs = [
+            c
+            for c in
+            self.all_chunks
+            if c not in self.done
+        ]
+        qs.sort(
+            key=lambda c: (
+                -self.stream_priority(
+                    c
+                ),
+                self.stream_ms[c],
+                c,
             )
-            for c in stream_selected:
-                self.done[c] = "stream"
+        )
 
-            if not compute_selected and not stream_selected:
-                remaining = [
-                    c for c in self.all_chunks
-                    if c not in self.done
-                ]
-                c = min(remaining, key=lambda x: self.stream_ms[x])
-                self.done[c] = "stream"
-                stream_selected = [c]
-                stream_used = self.stream_ms[c]
+        selected: list[
+            Chunk
+        ] = []
+        used = 0.0
 
-            stage_ms = max(compute_used, stream_used)
-            makespan_ms += stage_ms
+        for c in qs:
+            cost = self.stream_ms[
+                c
+            ]
+            if (
+                used + cost
+                <= self.delta_ms
+                + 1e-9
+            ):
+                selected.append(c)
+                used += cost
+
+        for c in selected:
+            self.done[c] = "stream"
+
+        return selected, used
+
+    def run(
+        self,
+    ) -> dict[str, Any]:
+        self.reset()
+
+        stages: list[
+            dict[str, Any]
+        ] = []
+        makespan_ms = 0.0
+
+        while (
+            len(self.done)
+            < len(
+                self.all_chunks
+            )
+        ):
+            stage_id = (
+                len(stages) + 1
+            )
+
+            compute, compute_ms = (
+                self._compute_phase()
+            )
+
+            # Paper resets the budget before streaming.
+            stream, stream_ms = (
+                self._stream_phase()
+            )
+
+            if (
+                not compute
+                and not stream
+            ):
+                remaining = sorted(
+                    self.all_chunks
+                    - set(
+                        self.done
+                    )
+                )
+                smallest_compute = min(
+                    (
+                        self.comp_ms[c]
+                        for c in
+                        remaining
+                        if self.compute_ready(
+                            c
+                        )
+                    ),
+                    default=float(
+                        "inf"
+                    ),
+                )
+                smallest_stream = min(
+                    self.stream_ms[c]
+                    for c in remaining
+                )
+
+                raise RuntimeError(
+                    "SparKV greedy scheduler made no progress. "
+                    "Delta t is smaller than every feasible operation: "
+                    f"delta_ms={self.delta_ms}, "
+                    f"min_compute={smallest_compute}, "
+                    f"min_stream={smallest_stream}. "
+                    "Increase --delta-ms; the paper does not define an "
+                    "oversized-operation exception."
+                )
+
+            duration = max(
+                compute_ms,
+                stream_ms,
+            )
+            makespan_ms += duration
+
             stages.append(
                 {
-                    "stage": stage_id,
-                    "duration_ms": stage_ms,
-                    "compute_ms": compute_used,
-                    "stream_ms": stream_used,
-                    "compute": [c.__dict__ for c in compute_selected],
-                    "stream": [c.__dict__ for c in stream_selected],
+                    "stage":
+                        stage_id,
+                    "duration_ms":
+                        duration,
+                    "compute_ms":
+                        compute_ms,
+                    "stream_ms":
+                        stream_ms,
+                    "compute": [
+                        c.__dict__
+                        for c in compute
+                    ],
+                    "stream": [
+                        c.__dict__
+                        for c in stream
+                    ],
                 }
             )
 
         compute_count = sum(
-            path == "compute"
-            for path in self.done.values()
+            route == "compute"
+            for route in
+            self.done.values()
         )
+
         return {
-            "makespan_ms": makespan_ms,
-            "stages": stages,
-            "chunks": len(self.all_chunks),
-            "compute_chunks": compute_count,
-            "stream_chunks": len(self.all_chunks) - compute_count,
+            "scheduler":
+                "sparkv-potential-aware-greedy",
+            "indexing":
+                "zero-based-python",
+            "delta_ms":
+                self.delta_ms,
+            "makespan_ms":
+                makespan_ms,
+            "chunks":
+                len(
+                    self.all_chunks
+                ),
+            "compute_chunks":
+                compute_count,
+            "stream_chunks":
+                (
+                    len(
+                        self.all_chunks
+                    )
+                    - compute_count
+                ),
+            "stages":
+                stages,
+            "assignments": {
+                c.key: route
+                for c, route in
+                sorted(
+                    self.done.items()
+                )
+            },
+            "unit_costs": {
+                c.key: {
+                    "comp_ms":
+                        float(
+                            self.comp_ms[
+                                c
+                            ]
+                        ),
+                    "stream_ms":
+                        float(
+                            self.stream_ms[
+                                c
+                            ]
+                        ),
+                }
+                for c in sorted(
+                    self.all_chunks
+                )
+            },
         }
 
 
-def _load_stream_profile(
-    path: str | None,
-) -> tuple[dict[str, float], dict[str, Any] | None]:
-    if path is None:
-        return {}, None
-
-    profile = json.loads(Path(path).read_text(encoding="utf-8"))
-    units = profile.get("units")
-    if not isinstance(units, dict):
-        raise ValueError("stream profile has no units mapping")
-
-    processing = {}
-    for key, item in units.items():
-        if "processing_ms" not in item:
-            raise ValueError(f"stream profile missing processing_ms for {key}")
-        processing[key] = max(0.0, float(item["processing_ms"]))
-
-    return processing, profile
-
-
-def load_costs(
-    profile_path: str,
-    cache_meta_path: str,
+def load_costs_from_profile(
+    *,
+    profile_path: Path,
     bandwidth_mbps: float,
-    processing_ms: float,
-    stream_profile_path: str | None = None,
-):
+) -> tuple[
+    int,
+    int,
+    int,
+    dict[Chunk, float],
+    dict[Chunk, float],
+]:
     if bandwidth_mbps <= 0:
-        raise ValueError("bandwidth_mbps must be positive")
-    if processing_ms < 0:
-        raise ValueError("processing_ms must be non-negative")
+        raise ValueError(
+            "bandwidth_mbps must be positive"
+        )
 
-    profile = json.loads(Path(profile_path).read_text(encoding="utf-8"))
-    meta = json.loads(Path(cache_meta_path).read_text(encoding="utf-8"))
-    layer_costs = profile["token_layer_ms_median"]
-
-    T = int(meta["num_chunks"])
-    L = int(meta["layers"])
-    H = int(meta["kv_heads"])
-
-    if len(layer_costs) != T:
-        raise ValueError("profile token-chunk count mismatch")
-    if any(len(row) != L for row in layer_costs):
-        raise ValueError("profile layer count mismatch")
-
-    unit_processing, stream_profile = _load_stream_profile(
-        stream_profile_path
+    profile = json.loads(
+        profile_path.read_text(
+            encoding="utf-8"
+        )
     )
 
-    comp_ms: dict[Chunk, float] = {}
-    stream_ms: dict[Chunk, float] = {}
+    geometry = profile[
+        "geometry"
+    ]
+    T = int(
+        geometry[
+            "token_chunks"
+        ]
+    )
+    L = int(
+        geometry["layers"]
+    )
+    H = int(
+        geometry["heads"]
+    )
+
+    units = profile[
+        "units"
+    ]
+
+    comp: dict[
+        Chunk,
+        float,
+    ] = {}
+    stream: dict[
+        Chunk,
+        float,
+    ] = {}
 
     for t in range(T):
         for layer in range(L):
-            layer_ms = float(layer_costs[t][layer])
-            if layer_ms <= 0:
-                raise ValueError(
-                    f"non-positive compute profile at t={t}, layer={layer}"
-                )
-
             for head in range(H):
-                c = Chunk(t, layer, head)
+                c = Chunk(
+                    t,
+                    layer,
+                    head,
+                )
+                item = units[
+                    c.key
+                ]
 
-                # This remains the paper-granularity cost proxy.
-                # The current HF compatibility executor still performs a full
-                # token-chunk forward whenever any unit is assigned to compute;
-                # therefore executor-side amplification is reported separately.
-                comp_ms[c] = max(1e-6, layer_ms / H)
+                comp[c] = float(
+                    item[
+                        "predicted_comp_ms"
+                    ]
+                )
 
                 wire_bytes = int(
-                    meta["chunks"][t]["lh_wire_bytes"][f"{layer}:{head}"]
+                    item[
+                        "wire_bytes"
+                    ]
                 )
+                processing_ms = float(
+                    item[
+                        "processing_ms"
+                    ]
+                )
+
                 wire_ms = (
-                    wire_bytes * 8.0 / (bandwidth_mbps * 1e6) * 1000.0
+                    wire_bytes
+                    * 8.0
+                    / (
+                        bandwidth_mbps
+                        * 1e6
+                    )
+                    * 1000.0
                 )
 
-                key = f"{t}:{layer}:{head}"
-                unit_overhead_ms = unit_processing.get(key, processing_ms)
-
-                stream_ms[c] = max(
-                    1e-6,
-                    wire_ms + unit_overhead_ms,
+                stream[c] = (
+                    wire_ms
+                    + processing_ms
                 )
 
-    cost_model = {
-        "compute_profile": str(profile_path),
-        "stream_profile": (
-            None if stream_profile_path is None else str(stream_profile_path)
-        ),
-        "bandwidth_mbps": bandwidth_mbps,
-        "fallback_processing_ms": processing_ms,
-        "stream_processing_source": (
-            "measured-unit-profile"
-            if stream_profile is not None
-            else "constant-fallback"
-        ),
-        "fine_grained_compute_exact": False,
-    }
-
-    return T, L, H, comp_ms, stream_ms, cost_model
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", required=True)
-    parser.add_argument("--cache-meta", required=True)
-    parser.add_argument("--stream-profile", default=None)
-    parser.add_argument("--bandwidth-mbps", type=float, default=640.0)
-    parser.add_argument("--processing-ms", type=float, default=0.02)
-    parser.add_argument("--delta-ms", type=float, default=5.0)
-    parser.add_argument("--output", required=True)
-    args = parser.parse_args()
-
-    T, L, H, comp, stream, cost_model = load_costs(
-        args.profile,
-        args.cache_meta,
-        args.bandwidth_mbps,
-        args.processing_ms,
-        args.stream_profile,
-    )
-
-    scheduler = SparKVScheduler(
+    return (
         T,
         L,
         H,
         comp,
         stream,
-        args.delta_ms,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--profile",
+        required=True,
+    )
+    parser.add_argument(
+        "--bandwidth-mbps",
+        type=float,
+        default=640.0,
+    )
+    parser.add_argument(
+        "--delta-ms",
+        type=float,
+        required=True,
+    )
+    parser.add_argument(
+        "--output",
+        required=True,
+    )
+    args = parser.parse_args()
+
+    (
+        T,
+        L,
+        H,
+        comp,
+        stream,
+    ) = load_costs_from_profile(
+        profile_path=Path(
+            args.profile
+        ),
+        bandwidth_mbps=
+            args.bandwidth_mbps,
+    )
+
+    scheduler = SparKVScheduler(
+        token_chunks=T,
+        layers=L,
+        heads=H,
+        comp_ms=comp,
+        stream_ms=stream,
+        delta_ms=args.delta_ms,
     )
     result = scheduler.run()
-    result["cost_model"] = cost_model
 
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    result[
+        "profile_path"
+    ] = str(
+        args.profile
+    )
+    result[
+        "bandwidth_mbps"
+    ] = float(
+        args.bandwidth_mbps
+    )
+
+    output = Path(
+        args.output
+    )
+    output.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    output.write_text(
+        json.dumps(
+            result,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     print(
         json.dumps(
             {
-                key: result[key]
-                for key in [
-                    "makespan_ms",
-                    "chunks",
-                    "compute_chunks",
-                    "stream_chunks",
-                    "cost_model",
-                ]
+                "saved":
+                    str(output),
+                "makespan_ms":
+                    result[
+                        "makespan_ms"
+                    ],
+                "compute_chunks":
+                    result[
+                        "compute_chunks"
+                    ],
+                "stream_chunks":
+                    result[
+                        "stream_chunks"
+                    ],
+                "stages":
+                    len(
+                        result[
+                            "stages"
+                        ]
+                    ),
             },
             indent=2,
         )
