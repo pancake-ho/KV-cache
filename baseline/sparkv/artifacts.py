@@ -15,7 +15,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
     apply_rotary_pos_emb,
 )
 
-from baseline.sparkv.experiment import (
+from baseline.sparkv.runtime import (
     clear_device_cache,
     describe_runtime,
     load_model,
