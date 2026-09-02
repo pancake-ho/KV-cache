@@ -245,6 +245,29 @@ def train_predictor(
     x_test_raw = x[split:]
     y_test = y[split:]
 
+    # Numerical conditioning for the scalar latency target.
+    # The paper fixes the 3->48->24->1 MLP, SGD, MSE and 6000/80:20 setup,
+    # but does not disclose optimizer hyperparameters. Standardizing y keeps
+    # the same one-output MLP and changes MSE only by a positive scale factor.
+    target_mean = float(
+        y_train.mean()
+    )
+    target_std = float(
+        y_train.std()
+    )
+    if target_std < 1e-8:
+        target_std = 1.0
+
+    y_train_normalized = (
+        (
+            y_train
+            - target_mean
+        )
+        / target_std
+    ).astype(
+        np.float32
+    )
+
     norm = Normalization.fit(
         x_train_raw
     )
@@ -275,7 +298,7 @@ def train_predictor(
         x_train
     )
     ty = torch.from_numpy(
-        y_train
+        y_train_normalized
     )
 
     for _ in range(
@@ -295,12 +318,12 @@ def train_predictor(
     model.eval()
 
     with torch.no_grad():
-        train_pred = (
+        train_pred_normalized = (
             model(tx)
             .numpy()
             .reshape(-1)
         )
-        test_pred = (
+        test_pred_normalized = (
             model(
                 torch.from_numpy(
                     x_test
@@ -309,6 +332,17 @@ def train_predictor(
             .numpy()
             .reshape(-1)
         )
+
+    train_pred = (
+        train_pred_normalized
+        * target_std
+        + target_mean
+    )
+    test_pred = (
+        test_pred_normalized
+        * target_std
+        + target_mean
+    )
 
     train_true = (
         y_train.reshape(-1)
@@ -352,6 +386,12 @@ def train_predictor(
             model.state_dict(),
         "normalization":
             asdict(norm),
+        "target_normalization": {
+            "mean":
+                target_mean,
+            "std":
+                target_std,
+        },
         "feature_names":
             list(
                 FEATURE_NAMES
@@ -443,6 +483,24 @@ class ComputationLatencyPredictor:
             )
         )
 
+        target_norm = payload.get(
+            "target_normalization",
+            {
+                "mean": 0.0,
+                "std": 1.0,
+            },
+        )
+        self.target_mean = float(
+            target_norm[
+                "mean"
+            ]
+        )
+        self.target_std = float(
+            target_norm[
+                "std"
+            ]
+        )
+
         self.dense_ms = float(
             payload["dense_ms"]
         )
@@ -483,10 +541,16 @@ class ComputationLatencyPredictor:
         )
 
         with torch.no_grad():
-            value = float(
+            normalized_value = float(
                 self.model(x)
                 .item()
             )
+
+        value = (
+            normalized_value
+            * self.target_std
+            + self.target_mean
+        )
 
         return max(
             1e-6,
