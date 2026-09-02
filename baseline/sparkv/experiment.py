@@ -31,6 +31,7 @@ from baseline.sparkv.artifacts import (
     profile_stream_processing,
 )
 from baseline.sparkv.executor import (
+    CloudMemorySource,
     execute_sparkv,
 )
 from baseline.sparkv.runtime_controller import (
@@ -518,6 +519,28 @@ def run_command(
                     f"{schedule_path}"
                 )
 
+            meta = json.loads(
+                (
+                    sample_dir
+                    / "meta.json"
+                ).read_text(
+                    encoding="utf-8"
+                )
+            )
+            preload_begin = (
+                time.perf_counter()
+            )
+            cloud_source = (
+                CloudMemorySource(
+                    sample_dir,
+                    meta,
+                )
+            )
+            cloud_preload_ms = (
+                time.perf_counter()
+                - preload_begin
+            ) * 1000.0
+
             for repeat in range(
                 args.repeats
             ):
@@ -569,6 +592,9 @@ def run_command(
                                     args.max_migrations_per_stage
                                 ),
                             )
+                        ),
+                        cloud_source=(
+                            cloud_source
                         ),
                     )
                 )
@@ -719,6 +745,16 @@ def run_command(
                     "schedule_path":
                         str(
                             schedule_path
+                        ),
+                    "cloud_preload_ms":
+                        float(
+                            cloud_preload_ms
+                        ),
+                    "measurement_scope":
+                        (
+                            "preloaded cloud bytes; "
+                            "wire + Huffman decode + H2D "
+                            "+ context rebuild + first token"
                         ),
                 }
 

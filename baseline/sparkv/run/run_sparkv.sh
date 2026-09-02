@@ -29,8 +29,10 @@ readonly BANDWIDTH_MBPS="${BANDWIDTH_MBPS:-640}"
 readonly JITTER_CV="${JITTER_CV:-0.0}"
 readonly SEED="${SEED:-2026}"
 
-# Paper states 1024-token chunks but does not disclose Delta t.
-readonly DELTA_MS="${DELTA_MS:-5.0}"
+# The paper defines Delta t but does not disclose its numerical value.
+# `auto` is a reproduction/smoke fallback implemented by scheduler.py.
+# It must not be reported as an author-provided setting.
+readonly DELTA_MS="${DELTA_MS:-auto}"
 
 # The paper motivation explicitly evaluates 5-bit + Huffman.
 # If an author-provided layer-wise allocation becomes available, supply a

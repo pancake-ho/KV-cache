@@ -258,26 +258,35 @@ def _decode_symbols(
     if bit_length < len(bits):
         del bits[bit_length:]
 
-    inverse = {
-        code.to01(): symbol
-        for symbol, code in codes.items()
-    }
-
-    # bitarray.decode(codebook) is implemented in C and returns an iterator.
-    decoded = list(
-        bits.decode(codes)
+    # bitarray.decode(codebook) is implemented in C and returns an
+    # iterator. Consume it directly into the final uint8 array instead of
+    # materializing Python int objects first.
+    iterator = bits.decode(
+        codes
+    )
+    decoded = np.fromiter(
+        iterator,
+        dtype=np.uint8,
+        count=count,
     )
 
-    if len(decoded) != count:
+    if decoded.size != count:
         raise ValueError(
             "Huffman decoded symbol count mismatch: "
-            f"expected={count}, got={len(decoded)}"
+            f"expected={count}, got={decoded.size}"
         )
 
-    return np.asarray(
-        decoded,
-        dtype=np.uint8,
-    )
+    try:
+        next(iterator)
+    except StopIteration:
+        pass
+    else:
+        raise ValueError(
+            "Huffman decoded more symbols than declared: "
+            f"count={count}"
+        )
+
+    return decoded
 
 
 @dataclass(frozen=True)

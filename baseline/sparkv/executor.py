@@ -36,8 +36,12 @@ class ExecutionStats:
     h2d_ms: float = 0.0
 
     compute_wall_ms: float = 0.0
+    compute_effective_ms: float = 0.0
     support_attention_ms: float = 0.0
     physical_dependency_wait_ms: float = 0.0
+
+    paper_not_ready_events: int = 0
+    physical_not_ready_events: int = 0
 
     runtime_migrations: int = 0
     permanently_blocked_to_stream: int = 0
@@ -68,10 +72,16 @@ class ExecutionStats:
                 self.h2d_ms,
             "compute_wall_ms":
                 self.compute_wall_ms,
+            "compute_effective_ms":
+                self.compute_effective_ms,
             "support_attention_ms":
                 self.support_attention_ms,
             "physical_dependency_wait_ms":
                 self.physical_dependency_wait_ms,
+            "paper_not_ready_events":
+                self.paper_not_ready_events,
+            "physical_not_ready_events":
+                self.physical_not_ready_events,
             "runtime_migrations":
                 self.runtime_migrations,
             "permanently_blocked_to_stream":
@@ -1226,6 +1236,7 @@ def execute_sparkv(
     jitter_cv: float,
     seed: int,
     controller_config: RuntimeControllerConfig,
+    cloud_source: CloudMemorySource | None = None,
 ) -> tuple[
     DynamicCache,
     ExecutionStats,
@@ -1298,13 +1309,17 @@ def execute_sparkv(
             )
     )
 
-    # Intentionally outside request timing.
-    cloud = (
-        CloudMemorySource(
-            sample_dir,
-            meta,
+    # For measured runs, callers should preload local cloud-artifact bytes
+    # before starting the request timer. The fallback preserves the old debug
+    # API when TTFT is not being measured.
+    cloud = cloud_source
+    if cloud is None:
+        cloud = (
+            CloudMemorySource(
+                sample_dir,
+                meta,
+            )
         )
-    )
 
     engine = HybridQwen3Engine(
         model=model,
@@ -1551,6 +1566,9 @@ def execute_sparkv(
         stage_compute_end = [
             None
         ]
+        stage_dependency_wait_ms = [
+            0.0
+        ]
 
         def stream_worker() -> None:
             try:
@@ -1737,6 +1755,7 @@ def execute_sparkv(
                             continue
 
                         if not ready:
+                            stats.paper_not_ready_events += 1
                             next_remaining.append(
                                 item
                             )
@@ -1747,6 +1766,7 @@ def execute_sparkv(
                                 c
                             )
                         ):
+                            stats.physical_not_ready_events += 1
                             next_remaining.append(
                                 item
                             )
@@ -1768,14 +1788,37 @@ def execute_sparkv(
                         break
 
                     if progress:
-                        idle_begin = None
+                        if idle_begin is not None:
+                            waited_ms = (
+                                time.perf_counter()
+                                - idle_begin
+                            ) * 1000.0
+                            stats.physical_dependency_wait_ms += (
+                                waited_ms
+                            )
+                            stage_dependency_wait_ms[0] += (
+                                waited_ms
+                            )
+                            idle_begin = None
                         continue
 
                     # Let the concurrent streaming path deliver physical
-                    # dependencies.  If it has finished and no further
+                    # dependencies. If it has finished and no further
                     # progress is possible, carry the compute operations to
                     # the next stage.
                     if stream_finished.is_set():
+                        if idle_begin is not None:
+                            waited_ms = (
+                                time.perf_counter()
+                                - idle_begin
+                            ) * 1000.0
+                            stats.physical_dependency_wait_ms += (
+                                waited_ms
+                            )
+                            stage_dependency_wait_ms[0] += (
+                                waited_ms
+                            )
+                            idle_begin = None
                         break
 
                     if idle_begin is None:
@@ -1788,10 +1831,17 @@ def execute_sparkv(
                     )
 
                 if idle_begin is not None:
-                    stats.physical_dependency_wait_ms += (
+                    waited_ms = (
                         time.perf_counter()
                         - idle_begin
                     ) * 1000.0
+                    stats.physical_dependency_wait_ms += (
+                        waited_ms
+                    )
+                    stage_dependency_wait_ms[0] += (
+                        waited_ms
+                    )
+                    idle_begin = None
 
                 deferred.extend(
                     remaining
@@ -1905,11 +1955,20 @@ def execute_sparkv(
             actual_compute_ms
         )
 
+        effective_compute_ms = max(
+            0.0,
+            actual_compute_ms
+            - stage_dependency_wait_ms[0],
+        )
+        stats.compute_effective_ms += (
+            effective_compute_ms
+        )
+
         controller.observe_stage(
             predicted_compute_ms=
                 predicted_compute_ms,
             actual_compute_ms=
-                actual_compute_ms,
+                effective_compute_ms,
             predicted_stream_ms=
                 predicted_stream_ms,
             actual_stream_ms=
@@ -1923,7 +1982,11 @@ def execute_sparkv(
                 "predicted_compute_ms":
                     predicted_compute_ms,
                 "actual_compute_ms":
+                    effective_compute_ms,
+                "actual_compute_worker_ms":
                     actual_compute_ms,
+                "dependency_wait_ms":
+                    stage_dependency_wait_ms[0],
                 "predicted_stream_ms":
                     predicted_stream_ms,
                 "actual_stream_ms":
