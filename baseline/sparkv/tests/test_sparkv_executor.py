@@ -11,6 +11,7 @@ from baseline.sparkv.codec import (
 )
 from baseline.sparkv.executor import (
     CloudMemorySource,
+    HybridQwen3Engine,
     UnitStore,
     _effective_bandwidth,
     _permanently_layer_blocked,
@@ -187,4 +188,93 @@ def test_cloud_memory_source_uses_actual_encoded_bytes(
     )
     assert len(blob) == (
         wire_bytes
+    )
+
+
+
+def test_finalized_layer_releases_dead_intermediates():
+    engine = (
+        HybridQwen3Engine
+        .__new__(
+            HybridQwen3Engine
+        )
+    )
+    engine.H = 2
+
+    target = (
+        0,
+        0,
+    )
+    keep = (
+        0,
+        1,
+    )
+
+    engine.hidden_inputs = {
+        target:
+            torch.zeros(1),
+        keep:
+            torch.ones(1),
+    }
+    engine.projection_cache = {
+        target: (
+            torch.zeros(1),
+            torch.zeros(1),
+            torch.zeros(1),
+        ),
+        keep: (
+            torch.ones(1),
+            torch.ones(1),
+            torch.ones(1),
+        ),
+    }
+    engine.local_heads = {
+        target: {0, 1},
+        keep: {0},
+    }
+    engine.attention_parts = {
+        Chunk(0, 0, 0):
+            torch.zeros(1),
+        Chunk(0, 0, 1):
+            torch.zeros(1),
+        Chunk(0, 1, 0):
+            torch.ones(1),
+    }
+
+    engine._release_finalized_state(
+        0,
+        0,
+    )
+
+    assert target not in (
+        engine.hidden_inputs
+    )
+    assert target not in (
+        engine.projection_cache
+    )
+    assert target not in (
+        engine.local_heads
+    )
+    assert (
+        Chunk(0, 0, 0)
+        not in engine.attention_parts
+    )
+    assert (
+        Chunk(0, 0, 1)
+        not in engine.attention_parts
+    )
+
+    # State for the next layer must remain intact.
+    assert keep in (
+        engine.hidden_inputs
+    )
+    assert keep in (
+        engine.projection_cache
+    )
+    assert keep in (
+        engine.local_heads
+    )
+    assert (
+        Chunk(0, 1, 0)
+        in engine.attention_parts
     )

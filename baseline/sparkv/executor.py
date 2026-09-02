@@ -427,6 +427,7 @@ class HybridQwen3Engine:
         ] = hidden
         return hidden
 
+    @torch.inference_mode()
     def _projection_context(
         self,
         t: int,
@@ -663,6 +664,7 @@ class HybridQwen3Engine:
             else values[0],
         )
 
+    @torch.inference_mode()
     def _compute_attention_part(
         self,
         c: Chunk,
@@ -767,6 +769,7 @@ class HybridQwen3Engine:
 
         return True
 
+    @torch.inference_mode()
     def compute_unit(
         self,
         c: Chunk,
@@ -871,6 +874,50 @@ class HybridQwen3Engine:
                 self.H
             )
         )
+
+    @torch.inference_mode()
+    def _release_finalized_state(
+        self,
+        t: int,
+        layer_idx: int,
+    ) -> None:
+        """Release GPU intermediates dead after one layer finalizes.
+
+        The final KV tensors remain owned by UnitStore and the next-layer
+        hidden state remains in hidden_inputs[(t, layer_idx + 1)].  Q/K/V
+        projections, the consumed input hidden state, per-head attention
+        outputs, and local-head bookkeeping for the finalized layer are no
+        longer needed and otherwise accumulate across the 8x36 geometry.
+        """
+        key = (
+            t,
+            layer_idx,
+        )
+
+        self.projection_cache.pop(
+            key,
+            None,
+        )
+        self.hidden_inputs.pop(
+            key,
+            None,
+        )
+        self.local_heads.pop(
+            key,
+            None,
+        )
+
+        for head in range(
+            self.H
+        ):
+            self.attention_parts.pop(
+                Chunk(
+                    t,
+                    layer_idx,
+                    head,
+                ),
+                None,
+            )
 
     def try_finalize_layer(
         self,
@@ -1040,13 +1087,13 @@ class HybridQwen3Engine:
                 key
             )
 
-            # Projection/attention state at this layer is no longer required
-            # once the hidden state for the next layer has been materialized.
-            # Keep attention_parts only until request completion for simpler
-            # debugging; clear the large shared projections.
-            self.projection_cache.pop(
-                key,
-                None,
+            # The next-layer hidden state and final KV ownership are now
+            # materialized.  Retaining old hidden/projection/attention tensors
+            # grows GPU memory with every finalized (t, layer), and is not
+            # required for subsequent SparKV execution.
+            self._release_finalized_state(
+                t,
+                layer_idx,
             )
 
             return True
