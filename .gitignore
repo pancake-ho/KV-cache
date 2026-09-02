@@ -4,3 +4,4 @@ baseline/sparkv/logs/
 **/__pycache__/
 *.py[cod]
 .pytest_cache/
+baseline/sparkv/__pycache__
