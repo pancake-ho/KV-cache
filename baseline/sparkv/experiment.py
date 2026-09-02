@@ -675,7 +675,9 @@ def run_command(
 
                 result = {
                     "record_type":
-                        "sparkv-direct",
+                        "sparkv-direct-v2",
+                    "protocol_version":
+                        "paper-oriented-v2",
                     "strategy":
                         "sparkv",
                     "paper_algorithm":
@@ -753,9 +755,15 @@ def run_command(
                     "measurement_scope":
                         (
                             "preloaded cloud bytes; "
-                            "wire + Huffman decode + H2D "
+                            "simulated wireless + Huffman decode + H2D "
                             "+ context rebuild + first token"
                         ),
+                    "network_mode":
+                        "preloaded-artifact bandwidth simulation",
+                    "energy_scope":
+                        "NVML GPU power integrated over TTFT",
+                    "paper_method":
+                        True,
                 }
 
                 result.update(

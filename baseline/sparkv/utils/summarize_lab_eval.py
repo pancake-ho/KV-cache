@@ -279,51 +279,23 @@ def main() -> None:
     )
 
     paired_metrics = {}
-    if {
-        "local_full",
-        "sparkv",
-    }.issubset(
-        paired.columns
-    ):
-        values = (
-            paired[
-                "local_full"
-            ]
-            / paired[
-                "sparkv"
-            ]
-        ).replace(
-            [np.inf, -np.inf],
-            np.nan,
-        ).dropna()
-        paired_metrics[
-            "median_local_over_sparkv"
-        ] = float(
-            values.median()
-        )
-
-    if {
+    for baseline in [
+        "local_sparse",
+        "strong_hybrid",
         "all_stream",
-        "sparkv",
-    }.issubset(
-        paired.columns
-    ):
-        values = (
-            paired[
-                "all_stream"
-            ]
-            / paired[
-                "sparkv"
-            ]
-        ).replace(
-            [np.inf, -np.inf],
-            np.nan,
-        ).dropna()
-        paired_metrics[
-            "median_all_stream_over_sparkv"
-        ] = float(
-            values.median()
-        )
+        "local_full",
+    ]:
+        if {baseline, "sparkv"}.issubset(paired.columns):
+            values = (
+                paired[baseline]
+                / paired["sparkv"]
+            ).replace(
+                [np.inf, -np.inf],
+                np.nan,
+            ).dropna()
+            paired_metrics[
+                f"median_{baseline}_over_sparkv"
+            ] = float(values.median())
 
     warnings = []
 
@@ -457,6 +429,17 @@ def main() -> None:
             "is not well characterized."
         )
 
+    observed_strategies = set(frame["strategy"].astype(str))
+    for expected in ["local_sparse", "strong_hybrid", "sparkv"]:
+        if expected not in observed_strategies:
+            warnings.append(
+                f"missing paper-protocol strategy: {expected}."
+            )
+    warnings.append(
+        "CacheGen is not implemented; the evaluation is not the complete "
+        "paper baseline suite."
+    )
+
     predictor_metrics = None
     if args.predictor:
         payload = torch.load(
@@ -502,12 +485,7 @@ def main() -> None:
         ]
         .mean()
     )
-    if (
-        "local_full"
-        in quality.index
-        and "sparkv"
-        in quality.index
-    ):
+    if "local_sparse" in quality.index and "sparkv" in quality.index:
         paired_metrics[
             "mean_f1_delta_sparkv_minus_local"
         ] = float(
@@ -515,12 +493,12 @@ def main() -> None:
                 "sparkv"
             ]
             - quality[
-                "local_full"
+                "local_sparse"
             ]
         )
 
     lines = [
-        "# SparKV lab evaluation",
+        "# SparKV paper-oriented lab evaluation",
         "",
         "## Aggregate",
         "",

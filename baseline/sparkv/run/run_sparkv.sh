@@ -75,6 +75,9 @@ readonly STREAM_ROOT="${RESULT_ROOT}/stream_profiles"
 readonly PROFILE_ROOT="${RESULT_ROOT}/scheduler_profiles"
 readonly SCHEDULE_ROOT="${RESULT_ROOT}/schedules"
 readonly RESULT_JSONL="${RESULT_ROOT}/sparkv.jsonl"
+readonly PLOT_ROOT="${RESULT_ROOT}/plots"
+readonly ALIGNMENT_JSON="${RESULT_ROOT}/paper_alignment.json"
+readonly ALIGNMENT_MD="${RESULT_ROOT}/paper_alignment.md"
 
 JOB_SUCCEEDED=0
 
@@ -242,7 +245,9 @@ python -m py_compile \
     baseline/sparkv/executor.py \
     baseline/sparkv/experiment.py \
     baseline/sparkv/utils/validate_results.py \
-    baseline/sparkv/utils/summarize_results.py
+    baseline/sparkv/utils/summarize_results.py \
+    baseline/sparkv/utils/plot_results.py \
+    baseline/sparkv/utils/audit_alignment.py
 
 python -m pytest -q baseline/sparkv/tests
 
@@ -345,10 +350,25 @@ python baseline/sparkv/utils/summarize_results.py \
     --output "${RESULT_ROOT}/summary.csv" \
     | tee "${RESULT_ROOT}/summary.txt"
 
+python -m baseline.sparkv.utils.audit_alignment \
+    "${RESULT_JSONL}" \
+    --predictor "${PREDICTOR}" \
+    --json "${ALIGNMENT_JSON}" \
+    --markdown "${ALIGNMENT_MD}" \
+    > "${RESULT_ROOT}/paper_alignment.stdout.json"
+
+python -m baseline.sparkv.utils.plot_results \
+    "${RESULT_JSONL}" \
+    --output-dir "${PLOT_ROOT}" \
+    --formats png,pdf \
+    > "${RESULT_ROOT}/plot_manifest.stdout.json"
+
 echo "utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     | tee -a "${RESULT_ROOT}/run_manifest.txt"
 
 echo "[SUCCESS] Direct SparKV pipeline completed."
 echo "[SUCCESS] Results: ${RESULT_ROOT}"
+echo "[SUCCESS] Alignment audit: ${ALIGNMENT_MD}"
+echo "[SUCCESS] Graphs: ${PLOT_ROOT}"
 
 JOB_SUCCEEDED=1

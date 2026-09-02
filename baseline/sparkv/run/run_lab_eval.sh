@@ -30,6 +30,8 @@ readonly DELTA_MS="${DELTA_MS:-auto}"
 readonly RUNTIME_WINDOW="${RUNTIME_WINDOW:-4}"
 readonly IMBALANCE_MARGIN="${IMBALANCE_MARGIN:-0.05}"
 readonly MAX_MIGRATIONS="${MAX_MIGRATIONS:-4}"
+readonly STRATEGIES="${STRATEGIES:-local_sparse,strong_hybrid,sparkv}"
+readonly STRONG_HYBRID_COMPUTE_FRACTION="${STRONG_HYBRID_COMPUTE_FRACTION:-0.5}"
 
 readonly SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 
@@ -53,9 +55,14 @@ readonly PREDICTOR="${SOURCE_RESULT_ROOT}/overhead_predictor.pt"
 readonly RESULT_ROOT="${REPO_ROOT}/results/sparkv/lab-eval-${SOURCE_JOB_ID}-to-${JOB_ID}"
 readonly SCHEDULE_ROOT="${RESULT_ROOT}/schedules"
 readonly ALL_STREAM_ROOT="${RESULT_ROOT}/all_stream_schedules"
+readonly LOCAL_SPARSE_ROOT="${RESULT_ROOT}/local_sparse_schedules"
+readonly STRONG_HYBRID_ROOT="${RESULT_ROOT}/strong_hybrid_schedules"
 readonly RESULT_JSONL="${RESULT_ROOT}/evaluation.jsonl"
 readonly SUMMARY_CSV="${RESULT_ROOT}/summary.csv"
 readonly REPORT_MD="${RESULT_ROOT}/report.md"
+readonly PLOT_ROOT="${RESULT_ROOT}/plots"
+readonly ALIGNMENT_JSON="${RESULT_ROOT}/paper_alignment.json"
+readonly ALIGNMENT_MD="${RESULT_ROOT}/paper_alignment.md"
 
 cd "${REPO_ROOT}"
 
@@ -99,7 +106,9 @@ mkdir -p \
     logs \
     "${RESULT_ROOT}" \
     "${SCHEDULE_ROOT}" \
-    "${ALL_STREAM_ROOT}"
+    "${ALL_STREAM_ROOT}" \
+    "${LOCAL_SPARSE_ROOT}" \
+    "${STRONG_HYBRID_ROOT}"
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 export HF_HOME="${HF_HOME:-/data/${USER}/hf_cache}"
@@ -155,6 +164,8 @@ done
     echo "runtime_window=${RUNTIME_WINDOW}"
     echo "imbalance_margin=${IMBALANCE_MARGIN}"
     echo "max_migrations=${MAX_MIGRATIONS}"
+    echo "strategies=${STRATEGIES}"
+    echo "strong_hybrid_compute_fraction=${STRONG_HYBRID_COMPUTE_FRACTION}"
 } | tee "${RESULT_ROOT}/run_manifest.txt"
 
 git status --short > "${RESULT_ROOT}/git_status.txt"
@@ -191,7 +202,9 @@ python -m py_compile \
     baseline/sparkv/evaluation.py \
     baseline/sparkv/overhead_model.py \
     baseline/sparkv/scheduler.py \
-    baseline/sparkv/utils/summarize_lab_eval.py
+    baseline/sparkv/utils/summarize_lab_eval.py \
+    baseline/sparkv/utils/plot_results.py \
+    baseline/sparkv/utils/audit_alignment.py
 
 python -m pytest -q baseline/sparkv/tests
 
@@ -224,13 +237,17 @@ for ((i=0; i<EVAL_SAMPLES; i++)); do
         --output "${SCHEDULE_ROOT}/${sample}.json"
 done
 
-echo "[2/3] Paired local / all-stream / SparKV evaluation"
+echo "[2/3] Paired paper-oriented baseline / SparKV evaluation"
 python -m baseline.sparkv.evaluation \
     --model "${MODEL_ID}" \
     --prepared "${PREPARED}" \
     --cloud-root "${CLOUD_ROOT}" \
     --schedule-root "${SCHEDULE_ROOT}" \
     --all-stream-schedule-root "${ALL_STREAM_ROOT}" \
+    --local-sparse-schedule-root "${LOCAL_SPARSE_ROOT}" \
+    --strong-hybrid-schedule-root "${STRONG_HYBRID_ROOT}" \
+    --strategies "${STRATEGIES}" \
+    --strong-hybrid-compute-fraction "${STRONG_HYBRID_COMPUTE_FRACTION}" \
     --output "${RESULT_JSONL}" \
     --samples "${EVAL_SAMPLES}" \
     --repeats "${REPEATS}" \
@@ -251,9 +268,24 @@ python baseline/sparkv/utils/summarize_lab_eval.py \
     --predictor "${PREDICTOR}" \
     | tee "${RESULT_ROOT}/summary.txt"
 
+python -m baseline.sparkv.utils.audit_alignment \
+    "${RESULT_JSONL}" \
+    --predictor "${PREDICTOR}" \
+    --json "${ALIGNMENT_JSON}" \
+    --markdown "${ALIGNMENT_MD}" \
+    > "${RESULT_ROOT}/paper_alignment.stdout.json"
+
+python -m baseline.sparkv.utils.plot_results \
+    "${RESULT_JSONL}" \
+    --output-dir "${PLOT_ROOT}" \
+    --formats png,pdf \
+    > "${RESULT_ROOT}/plot_manifest.stdout.json"
+
 echo "utc_end=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     | tee -a "${RESULT_ROOT}/run_manifest.txt"
 
 echo "[SUCCESS] Lab evaluation completed."
 echo "[SUCCESS] Results: ${RESULT_ROOT}"
 echo "[SUCCESS] Read first: ${REPORT_MD}"
+echo "[SUCCESS] Alignment audit: ${ALIGNMENT_MD}"
+echo "[SUCCESS] Graphs: ${PLOT_ROOT}"

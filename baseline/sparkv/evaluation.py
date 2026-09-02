@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from baseline.sparkv.runtime import (
 from baseline.sparkv.runtime_controller import (
     RuntimeControllerConfig,
 )
+from baseline.sparkv.scheduler import Chunk
 
 
 def _load_records(
@@ -166,6 +168,249 @@ def build_all_stream_schedule(
         encoding="utf-8",
     )
     return result
+
+
+def _schedule_geometry(
+    unit_costs: dict[str, Any],
+) -> tuple[list[Chunk], int, int, int]:
+    chunks = sorted(
+        (
+            Chunk(**_chunk_from_key(key))
+            for key in unit_costs
+        ),
+    )
+    if not chunks:
+        raise ValueError("empty unit cost table")
+
+    token_chunks = max(c.t for c in chunks) + 1
+    layers = max(c.layer for c in chunks) + 1
+    heads = max(c.head for c in chunks) + 1
+    expected = token_chunks * layers * heads
+    if len(chunks) != expected:
+        raise ValueError(
+            "unit cost table is not a complete (token, layer, head) grid: "
+            f"expected={expected}, got={len(chunks)}"
+        )
+    return chunks, token_chunks, layers, heads
+
+
+def _fixed_compute_ready(
+    c: Chunk,
+    done: dict[Chunk, str],
+    layers: int,
+) -> bool:
+    token_ready = (
+        c.t == 0
+        or c.layer == layers - 1
+        or Chunk(c.t - 1, c.layer, c.head) in done
+    )
+    layer_ready = (
+        c.layer == 0
+        or done.get(Chunk(c.t, c.layer - 1, c.head))
+        == "compute"
+    )
+    return c not in done and token_ready and layer_ready
+
+
+def _build_fixed_pipeline_schedule(
+    *,
+    sparkv_schedule_path: Path,
+    output: Path,
+    compute_tokens: int,
+    scheduler_name: str,
+    baseline_name: str,
+    partition_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a dependency-valid fixed positional baseline.
+
+    Early token chunks are recomputed and later token chunks are streamed.
+    Unlike SparKV, the assignment never uses per-unit overhead and runtime
+    migration is disabled by the evaluator.  This is the paper's Strong
+    Hybrid structure, while ``compute_tokens == T`` is Local Prefill using
+    the same SpargeAttention executor as SparKV.
+    """
+    source = _load_json(sparkv_schedule_path)
+    unit_costs = source["unit_costs"]
+    chunks, token_chunks, layers, heads = _schedule_geometry(unit_costs)
+    if not 0 <= compute_tokens <= token_chunks:
+        raise ValueError(
+            f"compute_tokens must be in [0, {token_chunks}]"
+        )
+
+    compute_pending = {
+        c for c in chunks if c.t < compute_tokens
+    }
+    stream_pending = set(chunks) - compute_pending
+
+    requested_delta = float(source.get("delta_ms", 0.0))
+    largest_compute = max(
+        (
+            float(unit_costs[c.key]["comp_ms"])
+            for c in compute_pending
+        ),
+        default=0.0,
+    )
+    largest_stream = max(
+        (
+            float(unit_costs[c.key]["stream_ms"])
+            for c in stream_pending
+        ),
+        default=0.0,
+    )
+    delta_ms = max(requested_delta, largest_compute, largest_stream)
+    if delta_ms <= 0:
+        raise ValueError("fixed pipeline requires positive unit costs")
+
+    done: dict[Chunk, str] = {}
+    stages: list[dict[str, Any]] = []
+    makespan_ms = 0.0
+
+    while len(done) < len(chunks):
+        selected_compute: list[Chunk] = []
+        compute_ms = 0.0
+        while True:
+            ready = sorted(
+                c
+                for c in compute_pending
+                if _fixed_compute_ready(c, done, layers)
+            )
+            fitting = [
+                c
+                for c in ready
+                if compute_ms
+                + float(unit_costs[c.key]["comp_ms"])
+                <= delta_ms + 1e-9
+            ]
+            if not fitting:
+                break
+            c = fitting[0]
+            compute_pending.remove(c)
+            done[c] = "compute"
+            selected_compute.append(c)
+            compute_ms += float(unit_costs[c.key]["comp_ms"])
+
+        selected_stream: list[Chunk] = []
+        stream_ms = 0.0
+        # The fixed hybrid baseline streams later context first while the
+        # early prefix advances through local Transformer dependencies.
+        for c in sorted(
+            stream_pending,
+            key=lambda item: (-item.t, item.layer, item.head),
+        ):
+            cost = float(unit_costs[c.key]["stream_ms"])
+            if stream_ms + cost <= delta_ms + 1e-9:
+                selected_stream.append(c)
+                stream_ms += cost
+
+        for c in selected_stream:
+            stream_pending.remove(c)
+            done[c] = "stream"
+
+        if not selected_compute and not selected_stream:
+            raise RuntimeError(
+                "fixed pipeline made no progress; the positional compute "
+                "partition is dependency-infeasible"
+            )
+
+        duration_ms = max(compute_ms, stream_ms)
+        makespan_ms += duration_ms
+        stages.append(
+            {
+                "stage": len(stages) + 1,
+                "duration_ms": duration_ms,
+                "compute_ms": compute_ms,
+                "stream_ms": stream_ms,
+                "compute": [c.__dict__ for c in selected_compute],
+                "stream": [c.__dict__ for c in selected_stream],
+            }
+        )
+
+    result = {
+        "scheduler": scheduler_name,
+        "baseline": baseline_name,
+        "paper_baseline": True,
+        "indexing": "zero-based-python",
+        "delta_ms": delta_ms,
+        "requested_delta_ms": requested_delta,
+        "delta_adjusted_for_unit_feasibility": not math.isclose(
+            delta_ms,
+            requested_delta,
+        ),
+        "makespan_ms": makespan_ms,
+        "chunks": len(chunks),
+        "compute_chunks": sum(route == "compute" for route in done.values()),
+        "stream_chunks": sum(route == "stream" for route in done.values()),
+        "geometry": {
+            "token_chunks": token_chunks,
+            "layers": layers,
+            "heads": heads,
+        },
+        "stages": stages,
+        "assignments": {
+            c.key: done[c]
+            for c in chunks
+        },
+        "unit_costs": unit_costs,
+        "source_sparkv_schedule": str(sparkv_schedule_path),
+        **partition_metadata,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    return result
+
+
+def build_local_sparse_schedule(
+    *,
+    sparkv_schedule_path: Path,
+    output: Path,
+) -> dict[str, Any]:
+    source = _load_json(sparkv_schedule_path)
+    _, token_chunks, _, _ = _schedule_geometry(source["unit_costs"])
+    return _build_fixed_pipeline_schedule(
+        sparkv_schedule_path=sparkv_schedule_path,
+        output=output,
+        compute_tokens=token_chunks,
+        scheduler_name="local-prefill-sparge-control",
+        baseline_name="Local Prefill",
+        partition_metadata={
+            "fixed_partition": "all token chunks computed locally",
+            "same_spargeattention_as_sparkv": True,
+        },
+    )
+
+
+def build_strong_hybrid_schedule(
+    *,
+    sparkv_schedule_path: Path,
+    output: Path,
+    compute_fraction: float = 0.5,
+) -> dict[str, Any]:
+    if not 0.0 < compute_fraction < 1.0:
+        raise ValueError("compute_fraction must be in (0, 1)")
+    source = _load_json(sparkv_schedule_path)
+    _, token_chunks, _, _ = _schedule_geometry(source["unit_costs"])
+    compute_tokens = max(
+        1,
+        min(
+            token_chunks,
+            int(math.ceil(token_chunks * compute_fraction)),
+        ),
+    )
+    return _build_fixed_pipeline_schedule(
+        sparkv_schedule_path=sparkv_schedule_path,
+        output=output,
+        compute_tokens=compute_tokens,
+        scheduler_name="strong-hybrid-fixed-positional",
+        baseline_name="Strong Hybrid",
+        partition_metadata={
+            "fixed_partition": "early compute / later stream",
+            "compute_fraction": float(compute_fraction),
+            "compute_token_chunks": compute_tokens,
+            "partition_parameter_paper_disclosed": False,
+            "same_codec_as_sparkv": True,
+            "same_spargeattention_as_sparkv": True,
+        },
+    )
 
 
 def _warm_model(
@@ -403,7 +648,9 @@ def _run_local(
 
     result = {
         "record_type":
-            "sparkv-lab-eval-v1",
+            "sparkv-lab-eval-v2",
+        "protocol_version":
+            "paper-oriented-v2",
         "strategy":
             "local_full",
         "sample_index":
@@ -454,6 +701,10 @@ def _run_local(
                 "full local prompt prefill "
                 "+ first generated token"
             ),
+        "network_mode":
+            "none",
+        "energy_scope":
+            "NVML GPU power integrated over TTFT",
         "cloud_preload_ms":
             0.0,
     }
@@ -491,6 +742,8 @@ def _run_cache_strategy(
 ) -> dict[str, Any]:
     if strategy not in {
         "all_stream",
+        "local_sparse",
+        "strong_hybrid",
         "sparkv",
     }:
         raise ValueError(
@@ -508,9 +761,7 @@ def _run_cache_strategy(
         runtime.device
     )
 
-    if strategy == (
-        "all_stream"
-    ):
+    if strategy != "sparkv":
         controller_config = (
             RuntimeControllerConfig(
                 window=runtime_window,
@@ -602,9 +853,13 @@ def _run_cache_strategy(
         prediction = ""
         f1 = None
 
+    schedule_document = _load_json(schedule_path)
+
     result = {
         "record_type":
-            "sparkv-lab-eval-v1",
+            "sparkv-lab-eval-v2",
+        "protocol_version":
+            "paper-oriented-v2",
         "strategy":
             strategy,
         "sample_index":
@@ -665,13 +920,28 @@ def _run_cache_strategy(
         "max_migrations_per_stage":
             (
                 0
-                if strategy
-                == "all_stream"
+                if strategy != "sparkv"
                 else max_migrations_per_stage
             ),
         "schedule_path":
             str(
                 schedule_path
+            ),
+        "schedule_scheduler":
+            schedule_document.get(
+                "scheduler"
+            ),
+        "schedule_delta_ms":
+            schedule_document.get(
+                "delta_ms"
+            ),
+        "schedule_delta_mode":
+            schedule_document.get(
+                "delta_selection",
+                {},
+            ).get(
+                "mode",
+                "fixed-baseline",
             ),
         "cloud_preload_ms":
             float(
@@ -684,16 +954,32 @@ def _run_cache_strategy(
                 "decode + H2D + cache rebuild "
                 "+ first generated token"
             ),
+        "network_mode":
+            (
+                "none"
+                if strategy == "local_sparse"
+                else "preloaded-artifact bandwidth simulation"
+            ),
+        "energy_scope":
+            "NVML GPU power integrated over TTFT",
     }
     result.update(
         exec_stats.to_dict()
     )
-    if strategy == (
-        "all_stream"
-    ):
+    if strategy != "sparkv":
         result[
             "runtime_adaptation"
         ] = False
+    result["paper_baseline"] = strategy in {
+        "local_sparse",
+        "strong_hybrid",
+    }
+    result["paper_method"] = strategy == "sparkv"
+    if strategy == "strong_hybrid":
+        result["strong_hybrid_compute_fraction"] = schedule_document.get(
+            "compute_fraction"
+        )
+        result["strong_hybrid_partition_parameter_paper_disclosed"] = False
 
     del (
         cache,
@@ -731,7 +1017,33 @@ def make_parser() -> (
     )
     parser.add_argument(
         "--all-stream-schedule-root",
-        required=True,
+        default=None,
+    )
+    parser.add_argument(
+        "--local-sparse-schedule-root",
+        default=None,
+    )
+    parser.add_argument(
+        "--strong-hybrid-schedule-root",
+        default=None,
+    )
+    parser.add_argument(
+        "--strategies",
+        default="local_sparse,strong_hybrid,sparkv",
+        help=(
+            "Comma-separated subset of local_full, local_sparse, "
+            "all_stream, strong_hybrid, sparkv. The paper-aligned "
+            "default excludes local_full and the all-stream control."
+        ),
+    )
+    parser.add_argument(
+        "--strong-hybrid-compute-fraction",
+        type=float,
+        default=0.5,
+        help=(
+            "Early-token compute fraction for the fixed Strong Hybrid "
+            "baseline. The SparKV paper does not disclose this value."
+        ),
     )
     parser.add_argument(
         "--samples",
@@ -843,13 +1155,43 @@ def main() -> None:
         exist_ok=True,
     )
 
-    all_stream_root = Path(
-        args.all_stream_schedule_root
-    )
-    all_stream_root.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    allowed_strategies = {
+        "local_full",
+        "local_sparse",
+        "all_stream",
+        "strong_hybrid",
+        "sparkv",
+    }
+    strategies = [
+        item.strip()
+        for item in args.strategies.split(",")
+        if item.strip()
+    ]
+    if not strategies:
+        raise ValueError("at least one strategy is required")
+    if len(strategies) != len(set(strategies)):
+        raise ValueError("strategies must not contain duplicates")
+    invalid = set(strategies) - allowed_strategies
+    if invalid:
+        raise ValueError(f"invalid strategies: {sorted(invalid)}")
+
+    schedule_roots = {
+        "all_stream": Path(
+            args.all_stream_schedule_root
+            or output.parent / "all_stream_schedules"
+        ),
+        "local_sparse": Path(
+            args.local_sparse_schedule_root
+            or output.parent / "local_sparse_schedules"
+        ),
+        "strong_hybrid": Path(
+            args.strong_hybrid_schedule_root
+            or output.parent / "strong_hybrid_schedules"
+        ),
+    }
+    for strategy, root in schedule_roots.items():
+        if strategy in strategies:
+            root.mkdir(parents=True, exist_ok=True)
 
     with output.open(
         "w",
@@ -910,19 +1252,29 @@ def main() -> None:
                 - preload_begin
             ) * 1000.0
 
-            all_stream_schedule = (
-                all_stream_root
-                / (
-                    sample_name
-                    + ".json"
+            control_schedules: dict[str, Path] = {}
+            if "all_stream" in strategies:
+                path = schedule_roots["all_stream"] / f"{sample_name}.json"
+                build_all_stream_schedule(
+                    sparkv_schedule_path=sparkv_schedule,
+                    output=path,
                 )
-            )
-            build_all_stream_schedule(
-                sparkv_schedule_path=
-                    sparkv_schedule,
-                output=
-                    all_stream_schedule,
-            )
+                control_schedules["all_stream"] = path
+            if "local_sparse" in strategies:
+                path = schedule_roots["local_sparse"] / f"{sample_name}.json"
+                build_local_sparse_schedule(
+                    sparkv_schedule_path=sparkv_schedule,
+                    output=path,
+                )
+                control_schedules["local_sparse"] = path
+            if "strong_hybrid" in strategies:
+                path = schedule_roots["strong_hybrid"] / f"{sample_name}.json"
+                build_strong_hybrid_schedule(
+                    sparkv_schedule_path=sparkv_schedule,
+                    output=path,
+                    compute_fraction=args.strong_hybrid_compute_fraction,
+                )
+                control_schedules["strong_hybrid"] = path
 
             for repeat in range(
                 args.repeats
@@ -930,11 +1282,7 @@ def main() -> None:
                 # Rotate strategy order to reduce systematic thermal/order
                 # bias.  Network-based strategies receive the same RNG seed
                 # for a paired common-random-number comparison.
-                base_order = [
-                    "local_full",
-                    "all_stream",
-                    "sparkv",
-                ]
+                base_order = list(strategies)
                 shift = (
                     sample_idx
                     + repeat
@@ -987,10 +1335,9 @@ def main() -> None:
                         )
                     else:
                         schedule_path = (
-                            all_stream_schedule
-                            if strategy
-                            == "all_stream"
-                            else sparkv_schedule
+                            sparkv_schedule
+                            if strategy == "sparkv"
+                            else control_schedules[strategy]
                         )
                         result = (
                             _run_cache_strategy(
@@ -1054,10 +1401,10 @@ def main() -> None:
                 "repeats":
                     args.repeats,
                 "strategies": [
-                    "local_full",
-                    "all_stream",
-                    "sparkv",
+                    *strategies,
                 ],
+                "strong_hybrid_compute_fraction":
+                    args.strong_hybrid_compute_fraction,
             },
             indent=2,
         )
