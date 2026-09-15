@@ -1,0 +1,23 @@
+model:
+  model_id: "Qwen/Qwen3-4B"
+  revision: "main"
+
+  # Characterization 및 LoRA 학습 모두 동일 precision 유지.
+  # 양자화 x
+  dtype: "bfloat16"
+  device_map: null
+
+  trust_remote_code: false
+  low_cpu_mem_usage: true
+
+  # training 때는 False로 override,
+  # characterization 때는 True로 사용.
+  use_cache: true
+
+expected_architecture:
+  model_type: "qwen3"
+  num_hidden_layers: 36
+  hidden_size: 2560
+  num_attention_heads: 32
+  num_key_value_heads: 8
+  head_dim: 128
