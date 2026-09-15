@@ -1,0 +1,71 @@
+phase1:
+  # 선정 TMLR 논문의 dataset preparation seed와 통일
+  seed: 42
+
+  # 논문은 max_input_length=1024를 사용.
+  # 단, 본 연구에서는 Qwen3-4B tokenizer로 길이를 측정함.
+  max_input_length: 1024
+
+  # 선정 논문의 create_dataset.py와 동일.
+  validation_fraction: 0.10
+
+  tokenizer_model_id: "Qwen/Qwen3-4B"
+  tokenizer_revision: "main"
+
+  tokenize_batch_size: 512
+  preview_rows: 5
+
+  output_name: "medical_heterogeneous_v1"
+
+
+datasets:
+
+  medmcqa:
+    repo_id: "openlifescienceai/medmcqa"
+    config_name: "default"
+    source_split: "train"
+
+    # 논문에서는 전체 train split 사용.
+    sample_limit: null
+    expected_selected_rows: 182822
+
+    domain: "medical"
+    task_type: "multiple_choice_qa"
+
+
+  pubmedqa:
+    repo_id: "bigbio/pubmed_qa"
+
+    # 논문 공식 코드와 동일한 PQA-L fold0.
+    labeled_config: "pubmed_qa_labeled_fold0_source"
+    labeled_splits:
+      - "train"
+      - "validation"
+
+    # fold0 train + validation = 500.
+    expected_labeled_rows: 500
+
+    # PQA-A.
+    artificial_config: "pubmed_qa_artificial_source"
+    artificial_split: "train"
+
+    # 논문에서 artificial 50k 사용.
+    artificial_limit: 50000
+    expected_artificial_rows: 50000
+
+    domain: "medical"
+    task_type: "yes_no_maybe_qa"
+
+
+  flashcards:
+    # 선정 논문의 공식 코드와 동일 source.
+    repo_id: "medalpaca/medical_meadow_medical_flashcards"
+    config_name: null
+    source_split: "train"
+
+    # 논문은 처음 10k samples를 사용.
+    take_first: 10000
+    expected_selected_rows: 10000
+
+    domain: "medical"
+    task_type: "open_qa"
