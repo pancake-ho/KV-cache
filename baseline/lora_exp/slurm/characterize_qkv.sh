@@ -4,7 +4,7 @@
 #SBATCH -p batch_eebme_ugrad
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=8
-#SBATCH --mem-per-gpu=29G
+#SBATCH --mem-per-gpu=18G
 #SBATCH --time=12:00:00
 #SBATCH -o runs/qkv/slurm-%j.out
 #SBATCH -e runs/qkv/slurm-%j.err
