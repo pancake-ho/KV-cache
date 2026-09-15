@@ -12,7 +12,7 @@
 set -euo pipefail
 
 
-PROJECT_DIR="/data/surt321/repos/lab/kv_cache/baseline/lora-exp"
+PROJECT_DIR="/data/surt321/repos/lab/kv_cache/baseline/lora_exp"
 
 echo "============================================================"
 echo "[SBATCH-START]"
