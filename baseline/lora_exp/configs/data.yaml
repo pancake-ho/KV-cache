@@ -35,6 +35,8 @@ datasets:
 
   pubmedqa:
     repo_id: "bigbio/pubmed_qa"
+  
+    trust_remote_code: true
 
     # 논문 공식 코드와 동일한 PQA-L fold0.
     labeled_config: "pubmed_qa_labeled_fold0_source"

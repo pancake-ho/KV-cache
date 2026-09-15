@@ -41,12 +41,32 @@ def _load(
     config_name: str | None,
     split: str,
     cache_dir: str | Path,
+    trust_remote_code: bool = False,
 ) -> Dataset:
+    """
+    Load one Hugging Face dataset split at an immutable revision.
+
+    Remote dataset code is disabled by default.
+    It must be explicitly enabled from the experiment configuration.
+    """
+
+    # Do not accidentally enable arbitrary remote dataset code.
+    trusted_remote_code_repos = {
+        "bigbio/pubmed_qa",
+    }
+
+    if trust_remote_code and repo_id not in trusted_remote_code_repos:
+        raise RuntimeError(
+            "trust_remote_code=True was requested for an "
+            f"unapproved dataset repository: {repo_id}"
+        )
+
     kwargs: dict[str, Any] = {
         "path": repo_id,
         "split": split,
         "revision": revision,
         "cache_dir": str(cache_dir),
+        "trust_remote_code": trust_remote_code,
     }
 
     if config_name is not None:
@@ -130,6 +150,9 @@ def load_pubmedqa(
             config_name=cfg["labeled_config"],
             split=split_name,
             cache_dir=cache_dir,
+            trust_remote_code=bool(
+                cfg.get("trust_remote_code", False)
+            ),
         )
 
         labeled_total += len(ds)
@@ -174,6 +197,9 @@ def load_pubmedqa(
         config_name=cfg["artificial_config"],
         split=artificial_split,
         cache_dir=cache_dir,
+        trust_remote_code=bool(
+            cfg.get("trust_remote_code", False)
+        ),
     )
 
     expected_artificial = int(

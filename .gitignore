@@ -5,3 +5,4 @@ baseline/sparkv/logs/
 *.py[cod]
 .pytest_cache/
 baseline/sparkv/__pycache__
+baseline/lora_exp/runs/
