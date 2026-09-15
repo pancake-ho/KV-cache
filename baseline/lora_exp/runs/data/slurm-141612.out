@@ -1,0 +1,43 @@
+============================================================
+[SBATCH-START]
+timestamp=2026-09-15T16:33:06+09:00
+job_id=141612
+host=moana-y4
+pwd=/data/surt321/repos/lab/kv_cache/baseline/lora_exp
+PROJECT_DIR=/data/surt321/repos/lab/kv_cache/baseline/lora_exp
+============================================================
+
+[ENV]
+pwd=/data/surt321/repos/lab/kv_cache/baseline/lora_exp
+python=/data/surt321/anaconda3/envs/lab/bin/python
+Python 3.10.20
+branch=exp/lora-test
+commit=3e1c65db53492c595c4b0ba3bf1b0a317f38bac0
+
+[GIT STATUS]
+?? runs/data/slurm-141612.err
+?? runs/data/slurm-141612.out
+
+[PYTHONPATH]
+/data/surt321/repos/lab/kv_cache/baseline/lora_exp/src:/data/surt321/repos/lab/kv_cache/baseline/lora_exp/src
+
+[PACKAGE / SOURCE PRECHECK]
+lora_exp package : ['/data/surt321/repos/lab/kv_cache/baseline/lora_exp/src/lora_exp']
+pipeline         : /data/surt321/repos/lab/kv_cache/baseline/lora_exp/src/lora_exp/data/pipeline.py
+registry         : /data/surt321/repos/lab/kv_cache/baseline/lora_exp/src/lora_exp/data/registry.py
+Phase-1 source import: PASS
+
+[LOCAL STORAGE]
+WORK_DIR=/local_datasets/surt321/lora_exp/phase1_141612
+HF_HOME=/local_datasets/surt321/hf_cache/lora_phase1_141612
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p2  1.8T  1.7T  1.8G 100% /
+
+[PACKAGE VERSIONS]
+datasets        : 3.6.0
+huggingface_hub : 0.36.2
+pyarrow         : 25.0.1
+transformers    : 4.51.3
+pyyaml          : 6.0.3
+
+[RUN PHASE 1]

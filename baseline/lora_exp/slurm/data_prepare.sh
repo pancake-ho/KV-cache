@@ -33,6 +33,7 @@ echo "job_id=${SLURM_JOB_ID:-NA}"
 echo "host=$(hostname)"
 echo "pwd=$(pwd)"
 echo "PROJECT_DIR=${PROJECT_DIR}"
+echo "WORK_DIR=${WORK_DIR}"
 echo "============================================================"
 
 
@@ -49,10 +50,27 @@ fi
 cd "${PROJECT_DIR}"
 
 mkdir -p runs/data
-mkdir -p "${WORK_DIR}"
+
+# IMPORTANT:
+# Do NOT create WORK_DIR here.
+#
+# scripts/01_prepare_data.py intentionally owns creation of
+# WORK_DIR and fails if it already exists, protecting us from
+# accidental overwrite of a previous experiment.
+mkdir -p "$(dirname "${WORK_DIR}")"
+
 mkdir -p "${HF_ROOT}"
 mkdir -p "${ARCHIVE_DIR}"
 mkdir -p "${MANIFEST_DIR}"
+
+
+# Fail early if a supposedly unique job directory somehow exists.
+if [[ -e "${WORK_DIR}" ]]; then
+    echo "[FATAL] WORK_DIR unexpectedly already exists:"
+    echo "  ${WORK_DIR}"
+    echo "A Slurm job ID should produce a unique Phase-1 directory."
+    exit 1
+fi
 
 
 # ============================================================
@@ -150,6 +168,28 @@ echo "WORK_DIR=${WORK_DIR}"
 echo "HF_HOME=${HF_HOME}"
 
 df -h /local_datasets || true
+
+
+# ============================================================
+# Local disk preflight
+# ============================================================
+
+# Phase 1 temporarily stores HF caches + Arrow files +
+# canonicalized Parquet files on the compute-node local disk.
+# Abort cleanly instead of failing halfway through if the node
+# is nearly full.
+MIN_FREE_KB=$((8 * 1024 * 1024))
+FREE_KB=$(df -Pk /local_datasets | awk 'NR==2 {print $4}')
+
+echo "free_local_kb=${FREE_KB}"
+echo "required_local_kb=${MIN_FREE_KB}"
+
+if [[ "${FREE_KB}" -lt "${MIN_FREE_KB}" ]]; then
+    echo "[FATAL] Not enough free space on /local_datasets."
+    echo "Need at least 8 GiB for Phase 1."
+    echo "Current node: $(hostname)"
+    exit 2
+fi
 
 
 # ============================================================
