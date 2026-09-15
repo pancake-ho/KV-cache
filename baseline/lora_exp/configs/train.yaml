@@ -1,0 +1,90 @@
+phase2:
+  # Phase 1의 성공 결과를 정확히 source로 고정.
+  phase1_receipt:
+    "data/manifests/phase1_job141618_receipt.json"
+
+  dataset_root_name:
+    "medical_heterogeneous_v1"
+
+  datasets:
+    - "medmcqa"
+    - "pubmedqa"
+    - "flashcards"
+
+  # Phase 1에서 저장한 paper-faithful SFT representation.
+  text_field: "paper_text"
+  token_count_field: "paper_token_count"
+
+  # Qwen3/SparKV 및 Phase 1과 동일.
+  sequence_length: 1024
+
+  # ----------------------------------------------------------
+  # Controlled training-token budget
+  # ----------------------------------------------------------
+  #
+  # 각 dataset을 EOS로 연결한 뒤 1024-token block으로 packing.
+  #
+  # 각 dataset이 제공할 수 있는 full block 수를 계산하고,
+  # 세 dataset 중 가장 작은 값으로 공통 budget을 맞춘다.
+  #
+  # 너무 긴 첫 실험을 방지하기 위한 상한.
+  # min dataset이 1024보다 작으면 실제 min 값을 그대로 사용.
+  max_common_train_blocks: 1024
+
+  # Cross-evaluation은 dataset마다 동일한 수의 validation blocks 사용.
+  validation_blocks: 64
+
+  append_eos_between_samples: true
+
+  # ----------------------------------------------------------
+  # Reproducibility
+  # ----------------------------------------------------------
+  seed: 2026
+
+  # ----------------------------------------------------------
+  # Training
+  # ----------------------------------------------------------
+
+  # 선정 논문 공식 SFT script와 동일.
+  learning_rate: 0.0001
+  num_train_epochs: 3
+
+  # RTX 3090 24GB 환경용 micro batch adaptation.
+  #
+  # 논문 global batch = 64.
+  # 1 GPU x microbatch 1 x accumulation 64 = global batch 64.
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 64
+
+  # 논문 script가 paged_adamw_32bit 사용.
+  # 주의: optimizer만 bitsandbytes이며,
+  # model quantization은 하지 않으므로 QLoRA가 아님.
+  optim: "paged_adamw_32bit"
+
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+
+  # 3090에서 1024 token plain-LoRA 학습을 위해 사용.
+  gradient_checkpointing: true
+
+  logging_steps: 5
+  save_total_limit: 2
+
+  bf16: true
+  fp16: false
+
+  # OOM 시 batch를 자동으로 바꾸면 dataset 간 학습 조건이 달라지므로
+  # 자동 변경 금지.
+  auto_find_batch_size: false
+
+  # 완료된 adapter는 재실행 시 skip.
+  resume_completed: true
+
+  # ----------------------------------------------------------
+  # Persistent output
+  # ----------------------------------------------------------
+  output_root:
+    "/data/$USER/models/lora_exp/phase2_balanced_v1"

@@ -1,0 +1,48 @@
+{
+  "phase": 1,
+  "timestamp": "2026-09-15T17:03:02.628944+09:00",
+  "status": "PASS",
+  "job_id": "141618",
+  "git_branch": "exp/lora-test",
+  "git_commit": "5d06adb2633f670debdc15f12023be86e1cc7665",
+  "git_status": "",
+  "archive": "/data/surt321/datasets/lora_exp/archives/phase1_medical_heterogeneous_v1_job141618.tar.gz",
+  "archive_size_bytes": 193369464,
+  "archive_sha256": "7b96d35997b4fddd9f1e00a321978907b41e3138bd8a5be1c89f03c116935575",
+  "tokenizer": {
+    "model_id": "Qwen/Qwen3-4B",
+    "revision": "1cfa9a7208912126459214e8b04321603b3df60c"
+  },
+  "prepared": {
+    "medmcqa": {
+      "train_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/medmcqa/train.parquet",
+      "validation_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/medmcqa/validation.parquet",
+      "stats_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/medmcqa/stats.json",
+      "preview_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/medmcqa/preview.jsonl",
+      "train_sha256": "e423f13924541f4bca05f175b16c1dd49955a61b7f46ccc8aaef656861516c94",
+      "validation_sha256": "62c35748f02e7ed9398debdfcd002d46a95020f245c256d5b72e1420518171b9",
+      "train_rows": 164539,
+      "validation_rows": 18283
+    },
+    "pubmedqa": {
+      "train_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/pubmedqa/train.parquet",
+      "validation_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/pubmedqa/validation.parquet",
+      "stats_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/pubmedqa/stats.json",
+      "preview_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/pubmedqa/preview.jsonl",
+      "train_sha256": "c6a8154acd96489786a6f155e5f11a8291b181d143e617edfd5c31368b826bd7",
+      "validation_sha256": "0708b0c69a73882adf097f12d8da7debb95eb2f69832d59447e3ce2f66c30852",
+      "train_rows": 45435,
+      "validation_rows": 5049
+    },
+    "flashcards": {
+      "train_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/flashcards/train.parquet",
+      "validation_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/flashcards/validation.parquet",
+      "stats_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/flashcards/stats.json",
+      "preview_path": "/local_datasets/surt321/lora_exp/phase1_141618/medical_heterogeneous_v1/flashcards/preview.jsonl",
+      "train_sha256": "633b49776cfc9bb0a17d246c2e7567f38a083e35a2ce7022cd9d624d1f3563c1",
+      "validation_sha256": "b14c387b637b05f2615726f301b5740c41801fbac6229df2577042446b2cc94c",
+      "train_rows": 8999,
+      "validation_rows": 1000
+    }
+  }
+}

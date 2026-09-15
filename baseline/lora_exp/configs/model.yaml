@@ -1,6 +1,6 @@
 model:
   model_id: "Qwen/Qwen3-4B"
-  revision: "main"
+  revision: "1cfa9a7208912126459214e8b04321603b3df60c"
 
   # Characterization 및 LoRA 학습 모두 동일 precision 유지.
   # 양자화 x
