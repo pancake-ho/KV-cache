@@ -21,7 +21,11 @@ phase3b:
   # null이면 train/eval budget을 만족하는 subject 중
   # available train blocks가 많은 순서로 deterministic selection.
   # 결과는 topic_plan.json에 실제 subject명과 함께 고정된다.
-  subjects: null
+  subjects:
+    - "Medicine"
+    - "Surgery"
+    - "Pathology"
+    - "Anatomy"
 
   # 각 topic LoRA에 동일한 training-token budget을 적용한다.
   max_common_train_blocks: 512
