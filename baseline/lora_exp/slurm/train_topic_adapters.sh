@@ -3,7 +3,7 @@
 #SBATCH -p batch_eebme_ugrad
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=8
-#SBATCH --mem-per-gpu=29G
+#SBATCH --mem-per-gpu=18G
 #SBATCH --time=1-0
 #SBATCH -o runs/topic_train/slurm-%j.out
 #SBATCH -e runs/topic_train/slurm-%j.err

@@ -1,0 +1,92 @@
+phase3c:
+  # ==========================================================
+  # Scientific target
+  # ==========================================================
+  # Cross-domain LoRA characterization for professor review.
+  # Datasets follow the 2026 cross-domain PEFT benchmark:
+  #   Medical : MedQA, MedMCQA
+  #   Finance : FPB, FiQA-SA
+  #
+  # IMPORTANT:
+  #   - Qwen3-4B / BF16 / plain LoRA are preserved.
+  #   - No QLoRA / model quantization is introduced.
+  #   - Phase 3C uses the paper's 512-token max length.
+  #   - Same-input Q/K/V comparison is the PRIMARY result.
+  # ==========================================================
+
+  model_config: "configs/model.yaml"
+  lora_config: "configs/lora.yaml"
+  base_train_config: "configs/train.yaml"
+
+  dataset_root:
+    "/data/$USER/datasets/lora_exp/cross_domain_v1"
+
+  adapter_output_root:
+    "/data/$USER/models/lora_exp/phase3c_cross_domain_seed2026"
+
+  characterization_output_root:
+    "/data/$USER/models/lora_exp/phase3c_same_input_seed2026"
+
+  seed: 2026
+
+  # Paper preprocessing uses maximum sequence length 512.
+  sequence_length: 512
+
+  # Keep a fair common packed-token budget.
+  # Actual budget = min(max_common_train_blocks, minimum available blocks).
+  max_common_train_blocks: 128
+  min_common_train_blocks: 32
+  validation_blocks: 32
+
+  # The previous Phase 2 used accumulation=64 with 1024-token blocks.
+  # Finance datasets are much smaller; using 8 here gives enough optimizer
+  # updates while remaining identical across all four Phase-3C adapters.
+  gradient_accumulation_steps: 8
+
+  # 4 datasets × 16 held-out records = 64 shared-input probes.
+  probe_records_per_dataset: 16
+  max_probe_tokens: 512
+
+  bootstrap_replicates: 5000
+  permutation_replicates: 20000
+  ci_level: 0.95
+  stats_seed: 2026
+
+  datasets:
+    medqa:
+      domain: "medical"
+      task: "closed_qa"
+      repo_id: "awinml/medqa"
+      config_name: "questions"
+      source_train: "train"
+      source_test: "test"
+      # Reproduce the benchmark protocol: 10% of training is validation.
+      internal_validation_fraction: 0.10
+
+    medmcqa:
+      domain: "medical"
+      task: "closed_qa"
+      repo_id: "openlifescienceai/medmcqa"
+      config_name: null
+      source_train: "train"
+      # Official validation is used as held-out final evaluation.
+      source_test: "validation"
+      internal_validation_fraction: 0.10
+
+    fpb:
+      domain: "finance"
+      task: "sentiment"
+      repo_id: "ChanceFocus/en-fpb"
+      config_name: null
+      source_train: "train"
+      source_validation: "valid"
+      source_test: "test"
+
+    fiqasa:
+      domain: "finance"
+      task: "sentiment"
+      repo_id: "ChanceFocus/flare-fiqasa"
+      config_name: null
+      source_train: "train"
+      source_validation: "valid"
+      source_test: "test"
