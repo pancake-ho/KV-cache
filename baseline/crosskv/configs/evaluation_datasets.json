@@ -1,0 +1,67 @@
+{
+  "downloaded_at_utc": "2026-08-09",
+  "datasets": {
+    "arc_challenge": {
+      "repo": "allenai/ai2_arc",
+      "revision": "210d026faf9955653af8916fad021475a3f00453",
+      "local_root": "datasets/arc_challenge",
+      "evaluation_file": "ARC-Challenge/test-00000-of-00001.parquet",
+      "evaluation_rows": 1172,
+      "evaluation_sha256": "62f03257e737aed263f55c6abf87c7bb0028a44a6bdd2a26eb1279eb42c1d1e9"
+    },
+    "winogrande": {
+      "repo": "allenai/winogrande",
+      "revision": "01e74176c63542e6b0bcb004dcdea22d94fb67b5",
+      "local_root": "datasets/winogrande",
+      "config": "winogrande_xl",
+      "evaluation_file": "winogrande_xl/validation-00000-of-00001.parquet",
+      "evaluation_rows": 1267,
+      "evaluation_sha256": "f9d914d1818c0aba98cabdf8af2bc4bd943c462b9c5e7062647e05c2ce3315d1"
+    },
+    "mmlu": {
+      "repo": "cais/mmlu",
+      "revision": "c30699e8356da336a370243923dbaf21066bb9fe",
+      "local_root": "datasets/mmlu",
+      "fewshot_file": "all/dev-00000-of-00001.parquet",
+      "fewshot_sha256": "2b19bde1ed8ca6b482fb283abc90e8e0d9d228947029c0b91795d64b28b3bc3f",
+      "evaluation_file": "all/test-00000-of-00001.parquet",
+      "evaluation_rows": 14042,
+      "evaluation_sha256": "74a41822ce7d3def56e1682f958469c04642a5336a5ce912fa375fdb90fb25d7"
+    },
+    "gsm8k": {
+      "repo": "openai/gsm8k",
+      "revision": "740312add88f781978c0658806c59bc2815b9866",
+      "local_root": "datasets/gsm8k",
+      "config": "main",
+      "evaluation_file": "main/test-00000-of-00001.parquet",
+      "evaluation_rows": 1319,
+      "evaluation_sha256": "ee7b8da9e381df27b9e3f7758a159ab2bdaa4dbaa910546cbbc47e0cb44e4f59"
+    },
+    "wikitext2": {
+      "repo": "EleutherAI/wikitext_document_level",
+      "revision": "647234772b9554e208af6c826f23b99e3cac88c8",
+      "local_root": "datasets/wikitext2",
+      "config": "wikitext-2-raw-v1",
+      "evaluation_file": "wikitext-2-raw-v1/wikitext-2-raw-v1-test.parquet",
+      "evaluation_rows": 62,
+      "evaluation_sha256": "e7fc7d4c385d027e0360f7eb320866df61adb68f385986e5c7f4f3911d62f4eb"
+    },
+    "coqa_single_reference": {
+      "repo": "stanfordnlp/coqa",
+      "revision": "0d9e9952f1ef6e5415492d3d84b5873259137e3c",
+      "local_root": "datasets/coqa",
+      "evaluation_file": "data/validation-00000-of-00001.parquet",
+      "evaluation_rows": 500,
+      "evaluation_sha256": "d66f4811dd137818923a3db7a629ce3cf9e73977b5e2541471311c1566bf349f"
+    },
+    "coqa": {
+      "repo": "EleutherAI/coqa",
+      "revision": "82e11af842af6c1396f5e9a5c7de260107c50cf1",
+      "local_root": "datasets/coqa_eleutherai",
+      "evaluation_file": "coqa_validation.parquet",
+      "evaluation_rows": 500,
+      "evaluation_sha256": "5ab4d352067c30ef4925efb0dfb2abeeed4cdfb236304aa7ee9df62ea781281f",
+      "note": "Same validation conversations, with three additional human answer sets required by the official CoQA F1."
+    }
+  }
+}

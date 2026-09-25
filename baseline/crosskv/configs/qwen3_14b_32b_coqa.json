@@ -1,0 +1,77 @@
+{
+  "paper_experiment": "Figure 4: Qwen3 14B<->32B CoQA handoff",
+  "calibration": {
+    "tokens": "work/qwen3_8b_to_32b/tokens.npy",
+    "tokens_sha256": "08c026b84dc41395a7ec0da2dc8bde4f971b8da92af474b254449a89ab8f5115",
+    "sequences": 500,
+    "sequence_length": 1024,
+    "stride": 4,
+    "observations": 128000,
+    "domain": "FineWeb-Edu"
+  },
+  "models": {
+    "qwen3_14b": {
+      "path": "Qwen/Qwen3-14B",
+      "config_sha256": "e73c3664ca09b10a673fef0c22e8a6b456201d49bd4713c9691f775720e8857a",
+      "model_index_sha256": "62d7ad35757bae5e7baa452cb1483178b7daa50e869e923226b8da10871f7ebc",
+      "layers": 40,
+      "kv_heads": 8,
+      "head_dim": 128
+    },
+    "qwen3_32b": {
+      "path": "Qwen/Qwen3-32B",
+      "config_sha256": "97e295b63283935788fac5e4f8860862a56d4089538cafc93f0431f2ebe483bb",
+      "model_index_sha256": "bed42c6c55274bc08a1f616bceb3bcb84b3f02cb6584c573bd18c6519291ecd0",
+      "layers": 64,
+      "kv_heads": 8,
+      "head_dim": 128
+    }
+  },
+  "mappers": {
+    "14b_to_32b": {
+      "path": "work/qwen3_14b_32b/mapper_14b_to_32b_k8",
+      "selection": "work/qwen3_14b_32b/selection_14b_to_32b_k8.json",
+      "k": 8,
+      "ridge": 0.01,
+      "parameters": 1073872896,
+      "training_r2_k": 0.7647366,
+      "training_r2_v": 0.6647214
+    },
+    "32b_to_14b": {
+      "path": "work/qwen3_14b_32b/mapper_32b_to_14b_k20",
+      "selection": "work/qwen3_14b_32b/selection_32b_to_14b_k20.json",
+      "k": 20,
+      "ridge": 0.01,
+      "parameters": 1677803520,
+      "training_r2_k": 0.8313166,
+      "training_r2_v": 0.7487964
+    }
+  },
+  "evaluation": {
+    "dataset": "datasets/coqa_eleutherai/coqa_validation.parquet",
+    "dataset_revision": "82e11af842af6c1396f5e9a5c7de260107c50cf1",
+    "dataset_sha256": "5ab4d352067c30ef4925efb0dfb2abeeed4cdfb236304aa7ee9df62ea781281f",
+    "domains": ["mctest", "race", "cnn", "wikipedia", "gutenberg"],
+    "conversations_per_domain": 20,
+    "selection_strategy": "first within each domain in the Parquet row order",
+    "handoff_turn_depths": [1, 3, 5, 7, 10],
+    "prompt": "lm-eval 0.4.12 CoQA completion prompt with primary gold answers as history",
+    "generation": "greedy, max_new_tokens=256, stop at newline-Q-colon",
+    "metric": "official/lm-eval leave-one-annotator-out word F1",
+    "paper_omissions": [
+      "the exact 100-conversation sample and random seed",
+      "the exact generation cap",
+      "any short-answer instruction or pre-existing history used before plotted turn 1"
+    ]
+  },
+  "outputs": {
+    "14b_to_32b": "outputs/coqa/qwen3_14b_to_32b_k8_first20_per_domain.jsonl",
+    "14b_to_32b_sha256": "a8e3abec1ae3d996aea397cf20531f8c12de224ac438348c03dc3c5c6f7cc912",
+    "14b_to_32b_summary": "outputs/coqa/qwen3_14b_to_32b_k8_first20_per_domain_summary.json",
+    "14b_to_32b_summary_sha256": "4fa6e251996b2f8efb7f21a590c5d10754a6cca6582dfd4e0208f58ef7a5c9f0",
+    "32b_to_14b": "outputs/coqa/qwen3_32b_to_14b_k20_first20_per_domain.jsonl",
+    "32b_to_14b_sha256": "70fc501cd87ec0060c3bb9ba4ea5b4444814a5ba1af9a7f42fad25e0cda4255c",
+    "32b_to_14b_summary": "outputs/coqa/qwen3_32b_to_14b_k20_first20_per_domain_summary.json",
+    "32b_to_14b_summary_sha256": "6b36db479a2f15e5b10089d1f393af736c8e6005ef8f5eb53cd6896539dd7f58"
+  }
+}

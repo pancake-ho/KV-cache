@@ -1,0 +1,81 @@
+{
+  "paper": "Cross-Model KV Cache Transfer in LLM Families: A Closed-Form Linear Mapping for Prefill Reuse",
+  "source_model": "Qwen/Qwen3-8B",
+  "target_model": "Qwen/Qwen3-32B",
+  "source_model_hf_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+  "target_model_hf_revision": "9216db5781bf21249d130ec9da846c4624c16137",
+  "calibration_dataset": "datasets/fineweb-edu/sample/10BT/000_00000.parquet",
+  "evaluation_dataset": "datasets/hellaswag/validation-00000-of-00001.parquet",
+  "evaluation_datasets_manifest": "configs/evaluation_datasets.json",
+  "evaluation_dataset_sha256": "899813071e1e95efafec90f856e1987d2150fa4d020fc005df6962c259f660cd",
+  "calibration_tokens_sha256": "08c02648817cae163c25a462b410ceba58e6f29d136f9dd27e2e62e69f30a981",
+  "num_sequences": 500,
+  "sequence_length": 1024,
+  "stride": 4,
+  "num_observations": 128000,
+  "selection_top_k": 12,
+  "selection_regression": "ols",
+  "production_regression": "ridge",
+  "ridge_lambda": 0.01,
+  "forward_dtype": "bfloat16",
+  "covariance_dtype": "float32",
+  "mapper_storage_dtype": "float32",
+  "evaluation_reference": "lm-eval 0.4.12, HellaSwag zero-shot completion, acc_norm",
+  "paper_target_hellaswag_acc_norm": 0.8265,
+  "paper_transfer_hellaswag_acc_norm": 0.7867,
+  "paper_hellaswag_retention_percent": 95.2,
+  "reproduced_target_hellaswag_acc_norm": 0.8260306711810397,
+  "reproduced_transfer_hellaswag_acc_norm": 0.7922724556861183,
+  "reproduced_hellaswag_retention_percent": 95.9132007233273,
+  "reproduced_hellaswag_floor_normalized_retention_percent": 94.13951076151784,
+  "reproduced_table13": {
+    "arc_challenge": {
+      "documents": 1172,
+      "metric": "acc_norm",
+      "standalone": 0.6126279863481229,
+      "transfer": 0.5639931740614335,
+      "retention_percent": 92.06128133704736
+    },
+    "hellaswag": {
+      "documents": 10042,
+      "metric": "acc_norm",
+      "standalone": 0.8260306711810397,
+      "transfer": 0.7922724556861183,
+      "retention_percent": 95.9132007233273
+    },
+    "winogrande": {
+      "documents": 1267,
+      "metric": "acc",
+      "standalone": 0.7277032359905288,
+      "transfer": 0.6724546172059984,
+      "retention_percent": 92.40780911062907
+    },
+    "mmlu": {
+      "documents": 14042,
+      "metric": "acc",
+      "standalone": 0.8208944594787068,
+      "transfer": 0.7289559891753311,
+      "retention_percent": 88.80020820681877
+    },
+    "gsm8k": {
+      "documents": 1319,
+      "metric": "flexible_exact_match",
+      "generation_budget": "1024 for all documents; 4096 replacement for 172 cap-hit documents",
+      "standalone": 0.9401061410159212,
+      "transfer": 0.6921910538286581,
+      "retention_percent": 73.62903225806451,
+      "max1024_sensitivity": {
+        "standalone": 0.9264594389689158,
+        "transfer": 0.6671721000758151,
+        "retention_percent": 72.01309328968905
+      }
+    },
+    "wikitext2": {
+      "chunks": 138,
+      "scored_tokens": 141174,
+      "metric": "ppl",
+      "standalone": 6.7802747214680394,
+      "transfer": 7.259064841315214
+    }
+  }
+}
