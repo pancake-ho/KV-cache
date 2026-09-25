@@ -1,0 +1,56 @@
+============================================================
+[SBATCH-START]
+timestamp=2026-09-15T16:23:36+09:00
+job_id=141611
+host=moana-y4
+pwd=/data/surt321/repos/lab/kv_cache/baseline/lora_exp
+============================================================
+
+[ENV]
+/data/surt321/anaconda3/envs/lab/bin/python
+Python 3.10.20
+branch=exp/lora-test
+commit=0cfe93808936e6da7ed3b7e3e7e23f651e4f8ead
+
+[GIT STATUS]
+ D ../lora-exp/configs/data.yaml
+ D ../lora-exp/configs/lora.yaml
+ D ../lora-exp/configs/model.yaml
+ D ../lora-exp/data/__init__.py
+ D ../lora-exp/data/formatters.py
+ D ../lora-exp/data/pipeline.py
+ D ../lora-exp/data/registry.py
+ D ../lora-exp/data/schema.py
+ D ../lora-exp/runs/env_check/manifest.json
+ D ../lora-exp/runs/env_check/slurm-141602.err
+ D ../lora-exp/runs/env_check/slurm-141602.out
+ D ../lora-exp/scripts/00_check_env.py
+ D ../lora-exp/scripts/01_prepare_data.py
+ D ../lora-exp/slurm/data_prepare.sh
+ D ../lora-exp/slurm/env_check.sh
+ D ../lora-exp/src/lora_exp/common/manifest.py
+ D ../lora-exp/src/lora_exp/common/seed.py
+ D ../lora-exp/src/lora_exp/model/factory.py
+ D ../lora-exp/src/lora_exp/model/lora_factory.py
+ D ../lora-exp/src/lora_exp/model/validate.py
+ M slurm/data_prepare.sh
+ M slurm/env_check.sh
+?? runs/data/slurm-141610.err
+?? runs/data/slurm-141610.out
+?? runs/data/slurm-141611.err
+?? runs/data/slurm-141611.out
+
+[LOCAL STORAGE]
+WORK_DIR=/local_datasets/surt321/lora-exp/phase1_141611
+HF_HOME=/local_datasets/surt321/hf_cache/lora_phase1_141611
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme0n1p2  1.8T  1.7T  1.8G 100% /
+
+[PACKAGE CHECK]
+datasets        : 3.6.0
+huggingface_hub : 0.36.2
+pyarrow         : 25.0.1
+transformers    : 4.51.3
+pyyaml          : 6.0.3
+
+[RUN PHASE 1]

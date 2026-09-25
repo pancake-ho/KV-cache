@@ -1,0 +1,77 @@
+phase3b:
+  # ==========================================================
+  # Provenance / shared sources
+  # ==========================================================
+  phase1_receipt: "data/manifests/phase1_job141618_receipt.json"
+  phase1_dataset_root: "medical_heterogeneous_v1"
+  source_dataset: "medmcqa"
+
+  model_config: "configs/model.yaml"
+  lora_config: "configs/lora.yaml"
+  base_train_config: "configs/train.yaml"
+
+  # ==========================================================
+  # Topic-specific LoRA construction
+  # ==========================================================
+  # MedMCQA subject를 medical sub-topic으로 사용한다.
+  # broad-domain 비교가 아니라, 동일 dataset/format 안에서
+  # topic effect만 분리하기 위한 controlled experiment이다.
+  num_topics: 4
+
+  # null이면 train/eval budget을 만족하는 subject 중
+  # available train blocks가 많은 순서로 deterministic selection.
+  # 결과는 topic_plan.json에 실제 subject명과 함께 고정된다.
+  subjects:
+    - "Medicine"
+    - "Surgery"
+    - "Pathology"
+    - "Anatomy"
+
+  # 각 topic LoRA에 동일한 training-token budget을 적용한다.
+  max_common_train_blocks: 512
+  validation_blocks: 32
+  min_train_blocks: 512
+  min_validation_blocks: 32
+
+  sequence_length: 1024
+  text_field: "paper_text"
+  token_count_field: "paper_token_count"
+  append_eos_between_samples: true
+
+  seed: 2026
+
+  topic_adapter_output_root:
+    "/data/$USER/models/lora_exp/phase3b_topic_adapters_seed2026"
+
+  # ==========================================================
+  # Cross-user factorial characterization
+  # ==========================================================
+  # 4 topics × 24 records = 96 semantic user prompts.
+  # topic_relation=same/different에 서로 다른 record pool을 써서
+  # topic main-effect 비교에서 record overlap을 제거한다.
+  records_per_topic: 24
+  same_topic_records_per_topic: 12
+  different_topic_records_per_topic: 12
+
+  max_prompt_tokens: 1024
+
+  userpair_probe_file:
+    "data/probes/phase3b_userpair_seed2026.jsonl"
+
+  userpair_output_root:
+    "/data/$USER/models/lora_exp/phase3b_userpair_seed2026"
+
+  # Prompt-level cross-query characterization.
+  # 서로 다른 길이/토큰의 cache를 직접 position-wise 비교하지 않고,
+  # layer/head별 token pooling 후 cosine을 비교한다.
+  pooling_modes:
+    - "mean_pool"
+    - "last_token"
+
+  bootstrap_replicates: 5000
+  permutation_replicates: 20000
+  ci_level: 0.95
+  stats_seed: 2026
+
+  # Feature cache를 남겨 GPU job 실패 시 이미 처리한 prompt를 재사용한다.
+  resume_features: true

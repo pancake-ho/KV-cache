@@ -1,0 +1,119 @@
+utc_start=2026-09-02T00:21:44Z
+job_id=138711
+hostname=moana-r2
+repo_root=/data/surt321/repos/lab/kv_cache
+branch=exp/sparkv-test
+commit=25ad4663cf1ce35663942cd04ac09deffedaa41c
+dirty=1
+python=/data/surt321/anaconda3/envs/lab/bin/python
+conda_env=lab
+model=Qwen/Qwen3-4B
+eval_samples=4
+prepared_samples=4
+profile_records=6000
+prompt_tokens=8193
+chunk_size=1024
+bandwidth_mbps=640
+jitter_cv=0.0
+delta_ms=auto
+layer_bits=5
+runtime_window=4
+imbalance_margin=0.05
+max_migrations=4
+predictor_epochs=400
+predictor_lr=0.01
+predictor_momentum=0.9
+NVIDIA GeForce RTX 3090, 24576 MiB, 535.161.07, 8.6
+Warning: Sage2++ NOT enabled
+bitarray: 3.10.1
+SpargeAttention/CUDA preflight: OK
+..........F...............                                               [100%]
+=================================== FAILURES ===================================
+________________ test_target_normalization_checkpoint_is_finite ________________
+
+tmp_path = PosixPath('/local_datasets/surt321/sparkv-direct/138711/tmp/pytest-of-surt321/pytest-0/test_target_normalization_chec0')
+
+    def test_target_normalization_checkpoint_is_finite(tmp_path):
+        rng = np.random.default_rng(
+            7
+        )
+        records = []
+        for index in range(
+            128
+        ):
+            token = float(
+                1
+                + index % 8
+            )
+            active = float(
+                8
+                + index % 31
+            )
+            util = float(
+                rng.integers(
+                    0,
+                    100,
+                )
+            )
+            target = (
+                0.3
+                + 0.07 * token
+                + 0.015 * active
+                + 0.002 * util
+            )
+            records.append(
+                {
+                    "token_block":
+                        token,
+                    "active_blocks":
+                        active,
+                    "gpu_util":
+                        util,
+                    "attention_ms":
+                        target,
+                }
+            )
+    
+        checkpoint = (
+            tmp_path
+            / "predictor.pt"
+        )
+        result = train_predictor(
+            records=records,
+            output=checkpoint,
+            config=(
+                PredictorTrainConfig(
+                    seed=7,
+                    samples=128,
+                    epochs=80,
+                    learning_rate=
+                        1e-2,
+                    momentum=0.9,
+                )
+            ),
+            dense_ms=4.0,
+            final_projection_ms=1.0,
+        )
+    
+        assert np.isfinite(
+            result[
+                "test_mae_ms"
+            ]
+        )
+    
+        payload = torch.load(
+            checkpoint,
+            map_location="cpu",
+            weights_only=False,
+        )
+>       assert (
+            "target_normalization"
+            in payload
+        )
+E       AssertionError: assert 'target_normalization' in {'dense_ms': 4.0, 'feature_names': ['token_block', 'active_blocks', 'gpu_util'], 'final_projection_ms': 1.0, 'metrics'...089211463928223, 'test_mape': 0.054436881095170975, 'test_records': 26, 'train_mae_ms': 0.04255778342485428, ...}, ...}
+
+baseline/sparkv/tests/test_predictor_target_normalization.py:86: AssertionError
+=========================== short test summary info ============================
+FAILED baseline/sparkv/tests/test_predictor_target_normalization.py::test_target_normalization_checkpoint_is_finite
+1 failed, 25 passed in 10.24s
+[INFO] local workdir preserved: /local_datasets/surt321/sparkv-direct/138711

@@ -1,0 +1,87 @@
+utc_start=2026-09-01T06:33:53Z
+job_id=138634
+hostname=moana-r2
+repo_root=/data/surt321/repos/lab/kv_cache
+branch=exp/sparkv-test
+commit=18edbd4e9006cc5d8f4905eaff96518b65f86a2c
+dirty=1
+python=/data/surt321/anaconda3/envs/lab/bin/python
+conda_env=lab
+model=Qwen/Qwen3-4B
+eval_samples=1
+prepared_samples=4
+profile_records=6000
+prompt_tokens=8193
+chunk_size=1024
+bandwidth_mbps=640
+jitter_cv=0.0
+delta_ms=5.0
+layer_bits=5
+runtime_window=4
+imbalance_margin=0.05
+max_migrations=4
+predictor_epochs=400
+predictor_lr=0.01
+predictor_momentum=0.9
+NVIDIA GeForce RTX 3090, 24576 MiB, 535.161.07, 8.6
+Warning: Sage2++ NOT enabled
+bitarray: 3.10.1
+SpargeAttention/CUDA preflight: OK
+.................                                                        [100%]
+17 passed in 8.46s
+[1/8] Prepare TriviaQA context
+Warning: Sage2++ NOT enabled
+{
+  "saved": "/local_datasets/surt321/sparkv-direct/138634/prepared_triviaqa.pt",
+  "samples": 4,
+  "prompt_tokens": 8193,
+  "prefill_tokens": 8192
+}
+[2/8] Build actual compressed cloud KV artifacts
+Warning: Sage2++ NOT enabled
+{"model_runtime": {"device": "cuda:0", "dtype": "bfloat16", "backend": "cuda-nf4"}}
+[
+  {
+    "sample_dir": "/local_datasets/surt321/sparkv-direct/138634/cloud/sample_000",
+    "unit_count": 2304,
+    "wire_bytes": 208189681
+  }
+]
+204M	/local_datasets/surt321/sparkv-direct/138634/cloud
+[3/8] Collect sparse-attention profiling records
+Warning: Sage2++ NOT enabled
+{"model_runtime": {"device": "cuda:0", "dtype": "bfloat16", "backend": "cuda-nf4"}}
+{
+  "records": 6000,
+  "dense_ms": 4.71347188949585,
+  "final_projection_ms": 0.9697279930114746,
+  "chunk_size": 1024,
+  "model": "Qwen/Qwen3-4B"
+}
+[4/8] Train SparKV 3-48-24-1 computation-latency MLP
+Warning: Sage2++ NOT enabled
+{
+  "saved": "/data/surt321/repos/lab/kv_cache/results/sparkv/direct-138634/overhead_predictor.pt",
+  "train_mae_ms": 12.988850593566895,
+  "test_mae_ms": 19.510759353637695,
+  "test_mape": 2.4624509811401367,
+  "train_records": 4800,
+  "test_records": 1200,
+  "dense_ms": 4.71347188949585,
+  "final_projection_ms": 0.9697279930114746
+}
+[5/8] Build per-sample stream + scheduler profiles
+Warning: Sage2++ NOT enabled
+{
+  "saved": "/data/surt321/repos/lab/kv_cache/results/sparkv/direct-138634/stream_profiles/sample_000.json",
+  "median_processing_ms": 34.70247075892985,
+  "units": 2304
+}
+Warning: Sage2++ NOT enabled
+{"model_runtime": {"device": "cuda:0", "dtype": "bfloat16", "backend": "cuda-nf4"}}
+{
+  "saved": "/data/surt321/repos/lab/kv_cache/results/sparkv/direct-138634/scheduler_profiles/sample_000.json",
+  "units": 2304
+}
+[6/8] Generate potential-aware SparKV schedules
+[INFO] local workdir preserved: /local_datasets/surt321/sparkv-direct/138634

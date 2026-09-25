@@ -1,0 +1,94 @@
+phase3:
+
+  # ----------------------------------------------------------
+  # Sources
+  # ----------------------------------------------------------
+
+  phase1_receipt:
+    "data/manifests/phase1_job141618_receipt.json"
+
+  phase1_dataset_root:
+    "medical_heterogeneous_v1"
+
+  phase2_output_root:
+    "/data/$USER/models/lora_exp/phase2_balanced_v1"
+
+  adapter_seed: 2026
+
+  adapters:
+    - medmcqa
+    - pubmedqa
+    - flashcards
+
+  # ----------------------------------------------------------
+  # Probe construction
+  # ----------------------------------------------------------
+
+  probe_seed: 2026
+
+  # dataset당 source sample 수.
+  # 각 sample에서 native + normalized를 만들기 때문에
+  # 실제 probe 수는 이보다 많음.
+  samples_per_dataset: 32
+
+  max_prompt_tokens: 1024
+
+  probe_file:
+    "data/probes/phase3_medical_control_seed2026.jsonl"
+
+  probe_manifest:
+    "data/probes/phase3_medical_control_seed2026_manifest.json"
+
+  # ----------------------------------------------------------
+  # Representation
+  # ----------------------------------------------------------
+
+  # Q:
+  # Qwen3 self-attention의 q_norm output을 capture.
+  # 이것은 RoPE 직전 Q.
+  #
+  # 동일 token position의 두 모델을 비교할 때
+  # 동일한 RoPE 회전은 cosine/L2 관계를 보존하므로
+  # cross-LoRA similarity 분석에 사용 가능.
+  q_capture: "q_norm"
+
+  tensor_types:
+    - q_attn
+    - k_cache
+    - v_cache
+
+  # raw QKV는 disk에 저장하지 않는다.
+  save_raw_tensors: false
+
+  # ----------------------------------------------------------
+  # Output
+  # ----------------------------------------------------------
+
+  output_root:
+    "/data/$USER/models/lora_exp/phase3_qkv_medical_control_seed2026"
+
+  resume: true
+
+  flush_every_probe: true
+
+  # summary에서 너무 작은 topic group 제외
+  min_group_size: 4
+
+  # ----------------------------------------------------------
+  # Refined statistical analysis
+  # ----------------------------------------------------------
+
+  refined_stats:
+    # Cross-dataset primary comparison에서는
+    # dataset-specific formatting effect를 제거하기 위해
+    # normalized prompt만 사용한다.
+    primary_variant: "normalized"
+
+    # base_record_id 단위 bootstrap
+    bootstrap_replicates: 5000
+
+    # paired form/context effect의 sign-flip permutation test
+    permutation_replicates: 20000
+
+    ci_level: 0.95
+    seed: 2026

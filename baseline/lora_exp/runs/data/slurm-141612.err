@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/data/surt321/repos/lab/kv_cache/baseline/lora_exp/scripts/01_prepare_data.py", line 794, in <module>
+    main()
+  File "/data/surt321/repos/lab/kv_cache/baseline/lora_exp/scripts/01_prepare_data.py", line 212, in main
+    raise RuntimeError(
+RuntimeError: Work directory already exists: /local_datasets/surt321/lora_exp/phase1_141612
+Use a new job-specific directory or pass --overwrite.

@@ -1,0 +1,18 @@
+{
+  "status": "PASS",
+  "probe_seed": 2026,
+  "samples_per_dataset": 32,
+  "total_probes": 224,
+  "dataset_counts": {
+    "medmcqa": 64,
+    "pubmedqa": 96,
+    "flashcards": 64
+  },
+  "variant_counts": {
+    "native": 96,
+    "normalized": 96,
+    "normalized_no_context": 32
+  },
+  "answer_excluded": true,
+  "probe_file": "/data/surt321/repos/lab/kv_cache/baseline/lora_exp/data/probes/phase3_medical_control_seed2026.jsonl"
+}

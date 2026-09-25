@@ -1,0 +1,21 @@
+lora:
+  task_type: "CAUSAL_LM"
+
+  # TMLR 2026 논문 설정을 그대로 사용
+  # Mitigating_Unintended_Memorization_with_LoRA_in_Federated_Learning_for_LLMs
+  r: 16
+  lora_alpha: 8
+  lora_dropout: 0.05
+
+  bias: "none"
+
+  # TMLR 논문의 "all projection layers" 설정을
+  # Qwen3에서 재현하기 위한 primary 설정.
+  # all-linear != QLoRA
+  # base model을 BF16으로 유지하고 quantization하지 않으므로
+  # 본 실험은 plain LoRA이다.
+  target_modules: "all-linear"
+
+  modules_to_save: null
+
+  inference_mode: false
