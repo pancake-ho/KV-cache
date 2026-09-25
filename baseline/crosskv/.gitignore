@@ -35,3 +35,4 @@ outputs/
 .DS_Store
 .idea/
 .vscode/
+jobs/logs/
