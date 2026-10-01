@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "source_model": "Qwen/Qwen3-1.7B",
+  "target_model": "Qwen/Qwen3-4B",
+  "source_revision": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+  "target_revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+  "expected_source_layers": 28,
+  "expected_target_layers": 36,
+  "expected_kv_heads": 8,
+  "expected_head_dim": 128,
+  "train_sequences": 500,
+  "heldout_sequences": 64,
+  "sequence_length": 1024,
+  "stride": 4,
+  "seed": 2026,
+  "document_train_fraction": 0.8,
+  "forward_dtype": "bfloat16",
+  "storage_dtype": "float16",
+  "covariance_dtype": "float32",
+  "covariance_rcond": 0.000001,
+  "text_field": "text",
+  "flush_sequences": 8
+}

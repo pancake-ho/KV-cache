@@ -1,0 +1,8 @@
+# Install in a separate environment cloned from your working CUDA environment.
+# Keep the existing CUDA-enabled PyTorch build; this file does not replace it.
+transformers==4.57.3
+accelerate>=1.1,<2
+numpy>=1.26,<3
+pyarrow>=16
+matplotlib>=3.8,<4
+pytest>=8,<10
