@@ -1,5 +1,5 @@
-# Install in a separate environment cloned from your working CUDA environment.
-# Keep the existing CUDA-enabled PyTorch build; this file does not replace it.
+# Version requirements checked against the EXISTING lab environment.
+# 00_setup_env.sh checks these versions; it does not install them.
 transformers==4.57.3
 accelerate>=1.1,<2
 numpy>=1.26,<3

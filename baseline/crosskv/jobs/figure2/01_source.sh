@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
-source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+REPO_ROOT="/data/surt321/repos/lab/kv_cache"
+FIGURE2_DIR="${REPO_ROOT}/baseline/crosskv/jobs/figure2"
+source "${FIGURE2_DIR}/lib.sh"
+
 : "${FIG2_DATASET:?Export FIG2_DATASET to the local FineWeb-Edu file}"
 : "${FIG2_RUN_DIR:?Set FIG2_RUN_DIR}"
-
-fig2_require_gpu
 mkdir -p "${FIG2_RUN_DIR}/provenance"
-python -m pip freeze > "${FIG2_RUN_DIR}/provenance/pip_freeze.txt"
+# Record installed versions with stdlib metadata. Runtime does not need pip.
+fig2_check_env --output "${FIG2_RUN_DIR}/provenance/environment_source.json"
+fig2_require_gpu
 nvidia-smi > "${FIG2_RUN_DIR}/provenance/nvidia_smi_source.txt"
 python -m compileall -q src/xmodel_kv/figure2
 python -m pytest -q tests/test_figure2.py tests/test_figure2_tiny_qwen.py
