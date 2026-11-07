@@ -8,11 +8,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from proposed.exp.mapper.data import ActivationStore, check_calibration_pair, minibatch
-from proposed.exp.mapper.model import HeadMLP
-from proposed.exp.mapper.spec import MapperSpec, expected_checkpoints
-from proposed.exp.mapper.stage import copy_selected
-from proposed.exp.mapper.train import build_spec
+from proposed.src.exp.mapper.data import ActivationStore, check_calibration_pair, minibatch
+from proposed.src.exp.mapper.model import HeadMLP
+from proposed.src.exp.mapper.spec import MapperSpec, expected_checkpoints
+from proposed.src.exp.mapper.stage import copy_selected
+from proposed.src.exp.mapper.train import build_spec
 
 
 def make_stores(root: Path, *, source_layers: int = 3, target_layers: int = 2):

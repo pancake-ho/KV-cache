@@ -41,7 +41,7 @@ if [[ "$KV_MAPPER_MODE" == train ]]; then
   exec 9>"$KV_MAPPER_DIR/.train.lock"
   flock -n 9 || { echo "ERROR: another training job uses the same mapper output directory" >&2; exit 2; }
   # Excludes all unselected source layers and all untargeted layers.
-  "$KV_MAPPER_PYTHON" -m proposed.exp.mapper.stage \
+  "$KV_MAPPER_PYTHON" -m proposed.src.exp.mapper.stage \
      --source "$KV_MAPPER_SOURCE" --target "$KV_MAPPER_TARGET" \
      --selection "$KV_MAPPER_SELECTION" --output "$scratch/calibration" \
      --layer-start "$KV_MAPPER_LAYER_START" --layer-end "$KV_MAPPER_LAYER_END" \
@@ -69,12 +69,12 @@ if [[ "$KV_MAPPER_MODE" == train ]]; then
        --train-dtype "$KV_MAPPER_TRAIN_DTYPE" --storage-dtype "$KV_MAPPER_STORAGE_DTYPE")
   [[ -z "$KV_MAPPER_HEAD_END" ]] || args+=(--head-end "$KV_MAPPER_HEAD_END")
   [[ -z "$KV_MAPPER_MAX_OBS" ]] || args+=(--max-observations "$KV_MAPPER_MAX_OBS")
-  "$KV_MAPPER_PYTHON" -m proposed.exp.mapper.cli "${args[@]}"
+  "$KV_MAPPER_PYTHON" -m proposed.src.exp.mapper.cli "${args[@]}"
 elif [[ "$KV_MAPPER_MODE" == eval ]]; then
   mkdir -p "$scratch/mapper"
   rsync -a "$KV_MAPPER_DIR/" "$scratch/mapper/"
   cp -p "$KV_MAPPER_INPUT" "$scratch/eval.jsonl"
-  "$KV_MAPPER_PYTHON" -m proposed.exp.mapper.cli eval \
+  "$KV_MAPPER_PYTHON" -m proposed.src.exp.mapper.cli eval \
       --mapper-dir "$scratch/mapper" --input-jsonl "$scratch/eval.jsonl" \
       --output-json "$scratch/evaluation.json" --prefix-length "$KV_MAPPER_PREFIX" \
       --max-examples "$KV_MAPPER_EXAMPLES" --token-chunk "$KV_MAPPER_TOKEN_CHUNK"
