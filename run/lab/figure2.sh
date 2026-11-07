@@ -56,7 +56,18 @@ kv_require_cmd docker
 [[ "$(docker inspect -f '{{.State.Running}}' "${container}" 2>/dev/null)" == true ]] || {
   echo "ERROR: Docker container not running: ${container}" >&2; exit 2;
 }
-echo "Container: ${container}; logical CUDA_VISIBLE_DEVICES=${gpu}. Verify physical GPU mapping with nvidia-smi -i 0,1."
+# Map the container GPU index to a physical NVML UUID and enforce host GPU 0/1.
+kv_require_cmd nvidia-smi
+allowed="$(nvidia-smi -i 0,1 --query-gpu=uuid --format=csv,noheader 2>/dev/null)" || {
+  echo "ERROR: cannot inspect authorized host GPUs 0 and 1" >&2; exit 2;
+}
+selected="$(docker exec "$container" nvidia-smi -i "$gpu" --query-gpu=uuid --format=csv,noheader 2>/dev/null)" || {
+  echo "ERROR: cannot resolve selected container GPU UUID" >&2; exit 2;
+}
+[[ -n "$selected" ]] && grep -Fxq -- "$selected" <<< "$allowed" || {
+  echo "ERROR: selected container GPU is not authorized host GPU 0 or 1" >&2; exit 2;
+}
+printf "Authorized host GPU UUID: %s (container index %s)\n" "$selected" "$gpu"
 # Protect new output directory names without touching existing files.
 docker exec --user "$(id -u):$(id -g)" -w "${container_repo}" "${container}" \
   bash -c 'test ! -e "$1"' -- "${result_dir}" || {

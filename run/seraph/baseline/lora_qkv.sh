@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "$0")/../../.." && pwd -P)"
 PROJECT="$ROOT/baseline/lora_exp"
-EXPECTED="/data/$USER/repos/lab/kv_cache"
+EXPECTED="/data/surt321/repos/lab/kv_cache"
 mode="--dry-run"
 if (( $# > 0 )); then mode="$1"; fi
 case "$mode" in

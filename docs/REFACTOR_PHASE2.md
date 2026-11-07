@@ -51,3 +51,6 @@ repository and requires host-side smoke evaluation.
 Inspect git log and git show for the phase1 and phase2 commits. After preserving
 worktree status and newer changes, git revert selected commits creates a
 non-destructive rollback commit. Avoid reset --hard or force-push.
+
+The pre-existing LoRA Slurm script itself is hardcoded to
+/data/surt321/repos/lab/kv_cache; the wrapper now enforces that exact legacy path.
