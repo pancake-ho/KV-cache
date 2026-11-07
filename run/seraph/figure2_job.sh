@@ -29,6 +29,12 @@ on_exit() {
   exit "${code}"
 }
 trap on_exit EXIT
+# Check scratch space BEFORE copying the input dataset.
+[[ -x "${KV_PYTHON}" ]] || { echo "ERROR: Python not executable: ${KV_PYTHON}" >&2; exit 2; }
+"${KV_PYTHON}" "${ROOT}/run/common/preflight.py" \
+  --config "${ROOT}/baseline/crosskv/configs/figure2_qwen3_1p7b_4b.json" \
+  --dataset "${KV_FIG2_DATASET}" --scratch "${scratch}" --mode "${KV_FIG2_MODE}" \
+  --staging --output "${scratch}/work/provenance/preflight_staging.json"
 # Stage only a single dataset file; no direct NAS memmap training.
 local_dataset="${scratch}/input/$(basename -- "${KV_FIG2_DATASET}")"
 cp -p -- "${KV_FIG2_DATASET}" "${local_dataset}"

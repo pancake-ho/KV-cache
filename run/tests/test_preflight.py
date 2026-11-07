@@ -28,6 +28,21 @@ class PreflightTest(unittest.TestCase):
         self.assertLess(preflight.estimate_bytes(self.config, smoke=True),
                         preflight.estimate_bytes(self.config, smoke=False))
 
+    def test_staging_accounts_for_input_copy(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = Path(tmp) / "input.jsonl"
+            dataset.write_bytes(b"0" * 4096)
+            with patch.object(preflight.shutil, "disk_usage") as disk:
+                disk.return_value.free = 100 * 1024 ** 3
+                before = preflight.check_space(self.config, dataset=dataset,
+                                               scratch=Path(tmp), smoke=True, staging=True)
+                after = preflight.check_space(self.config, dataset=dataset,
+                                              scratch=Path(tmp), smoke=True, staging=False)
+            self.assertEqual(before["required_free_bytes"] - after["required_free_bytes"], 4096)
+            self.assertTrue(before["staging_dataset"])
+            self.assertFalse(after["staging_dataset"])
+
     def test_missing_dataset_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):

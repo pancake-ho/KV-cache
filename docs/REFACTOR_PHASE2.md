@@ -54,3 +54,9 @@ non-destructive rollback commit. Avoid reset --hard or force-push.
 
 The pre-existing LoRA Slurm script itself is hardcoded to
 /data/surt321/repos/lab/kv_cache; the wrapper now enforces that exact legacy path.
+
+## Step 1 runtime safety
+Both Figure 2 launchers pre-check scratch capacity BEFORE copying the input dataset,
+including source-file size and the existing KV array estimate. A second check
+is performed after staging. CPU-only launcher tests verify dry-run and guardrails;
+these do not replace a live Slurm/Docker smoke test.

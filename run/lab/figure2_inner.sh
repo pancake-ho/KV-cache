@@ -16,6 +16,12 @@ if [[ "${KV_FIG2_DETACHED:-0}" == 1 ]]; then
   exec > "${result_dir}/docker.log" 2>&1
 fi
 trap 'code=$?; trap - EXIT; set +e; kv_export_small_results "${scratch}/work" "${result_dir}"; printf "status=%s\nexit_code=%s\nscratch=%s\n" "$([[ ${code} -eq 0 ]] && echo COMPLETE || echo FAILED)" "$code" "$scratch" > "${result_dir}/status.txt"; exit "$code"' EXIT
+# Check scratch space BEFORE copying the input dataset.
+[[ -x "${KV_PYTHON}" ]] || { echo "ERROR: Python not executable: ${KV_PYTHON}" >&2; exit 2; }
+"${KV_PYTHON}" "${ROOT}/run/common/preflight.py" \
+  --config "${ROOT}/baseline/crosskv/configs/figure2_qwen3_1p7b_4b.json" \
+  --dataset "${dataset}" --scratch "${scratch}" --mode "${mode}" \
+  --staging --output "${scratch}/work/provenance/preflight_staging.json"
 # Copy single dataset file to scratch, if source is elsewhere.
 local_dataset="${scratch}/input/$(basename -- "${dataset}")"
 cp -p -- "${dataset}" "${local_dataset}"
