@@ -51,3 +51,7 @@ The Docker container, GPU, input file, Python interpreter, and writable scratch 
 3. Large per-layer activation arrays are never copied to persistent results by default. Result manifests include source/target metadata, stage output and branch/dirty status.
 4. A fresh run tag is required. The launcher fails if the results directory exists and never overwrites historical runs.
 5. Run `bash -n` checks locally; full model/GPU/scheduler verification requires actual target servers.
+
+## Experiment-oriented interface
+
+Current uniform entry points: run/seraph/baseline/crosskv_figure2.sh and run/lab/baseline/crosskv_figure2.sh. The Seraph legacy LoRA QKV adapter is run/seraph/baseline/lora_qkv.sh (--dry-run default; --submit explicit). SparKV and GP_semcache remain unported due to experiment branch guards and submodule/runtime uncertainty. See docs/REFACTOR_PHASE2.md.

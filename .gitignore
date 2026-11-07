@@ -6,3 +6,10 @@ baseline/sparkv/logs/
 .pytest_cache/
 baseline/sparkv/__pycache__
 baseline/lora_exp/runs/
+
+# New portable KV research outputs (existing tracked files stay untouched)
+proposed/work/
+proposed/runs/
+baseline/crosskv/work/
+baseline/crosskv/jobs/logs/
+run/**/logs/

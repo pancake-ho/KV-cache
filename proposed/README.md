@@ -1,7 +1,19 @@
-# Proposed method (reserved)
+# Proposed KV-cache research
 
-This directory is reserved for the **new research method**. No neural KV mapper, KV transfer or multi-user scheduling implementation has been validated here yet.
+Our original approach belongs here and must never be implemented inside baseline/.
 
-The current 2026-10-07 baseline is under `baseline/crosskv/`. Until a proposed method and its interfaces are approved, keep this directory separate from paper reproduction code. Future code will be split by responsibility (data / model / mapping / transfer / train / eval), not by the execution server.
+No proposed model, mapper, KV injection mechanism, training result or accuracy/speed
+improvement is implemented or claimed yet.
 
-Use `run/seraph/` and `run/lab/` for launchers only; keep experimental results and checkpoints out of Git.
+When implementing approved research, split modules by real responsibility:
+- data: calibration/held-out, tokenizer alignment, prompt identity
+- models: source/target model loading, dtype, attention/cache layouts
+- mapping: mapper architectures, fitting and artifacts
+- transfer: RoPE-aware K/V transformation and target cache injection
+- train: fitting, checkpoint/resume
+- eval: generation accuracy, NLL/PPL and native target baselines
+- benchmark: prefill/decode/TTFT/E2E, throughput and memory accounting
+- common: configs, seeds, experiment provenance
+
+Add only modules that correspond to implemented functionality. Server-specific
+Slurm, Docker, paths, CUDA device selection and job logs belong under run/.
