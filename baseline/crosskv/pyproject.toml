@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xmodel-kv"
+version = "0.1.0"
+description = "Independent reproduction of closed-form cross-model KV cache transfer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["kv-cache", "llm-inference", "model-switching", "pytorch", "transformers"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "accelerate>=1.1",
+  "numpy>=1.26",
+  "pyarrow>=16",
+  "safetensors>=0.4",
+  "torch>=2.4",
+  "tqdm>=4.66",
+  "transformers>=4.51,<5",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+evaluation = [
+    "lm-eval[hf]>=0.4.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/forlight123/CrossKV"
+Repository = "https://github.com/forlight123/CrossKV"
+Issues = "https://github.com/forlight123/CrossKV/issues"
+
+[project.scripts]
+xkv-prepare = "xmodel_kv.cli.prepare:main"
+xkv-extract = "xmodel_kv.cli.extract:main"
+xkv-select = "xmodel_kv.cli.select:main"
+xkv-fit = "xmodel_kv.cli.fit:main"
+xkv-verify = "xmodel_kv.cli.verify:main"
+xkv-hellaswag = "xmodel_kv.cli.hellaswag:main"
+xkv-summarize-hellaswag = "xmodel_kv.cli.summarize_hellaswag:main"
+xkv-benchmark = "xmodel_kv.cli.benchmark:main"
+xkv-summarize-benchmark = "xmodel_kv.cli.summarize_benchmark:main"
+xkv-coqa = "xmodel_kv.cli.coqa:main"
+xkv-summarize-coqa = "xmodel_kv.cli.summarize_coqa:main"
+xkv-policy-imprinting = "xmodel_kv.cli.policy_imprinting:main"
+xkv-policy-patching = "xmodel_kv.cli.policy_patching:main"
+xkv-bfcl-policy-imprinting = "xmodel_kv.cli.bfcl_policy_imprinting:main"
+xkv-bfcl-memory-policy-imprinting = "xmodel_kv.cli.bfcl_memory_policy_imprinting:main"
+xkv-summarize-bfcl-handoff = "xmodel_kv.cli.summarize_bfcl_handoff:main"
+xkv-bfcl-authorization-handoff = "xmodel_kv.cli.bfcl_authorization_handoff:main"
+xkv-bfcl-authorization-prompt-position = "xmodel_kv.cli.bfcl_authorization_prompt_position:main"
+xkv-summarize-bfcl-prompt-position = "xmodel_kv.cli.summarize_bfcl_prompt_position:main"
+xkv-train-static-read-lens = "xmodel_kv.cli.train_static_read_lens:main"
+xkv-generate-diverse-handoff = "xmodel_kv.cli.generate_diverse_handoff:main"
+xkv-screen-diverse-handoff = "xmodel_kv.cli.screen_diverse_handoff:main"
+xkv-train-diverse-static-read-lens = "xmodel_kv.cli.train_diverse_static_read_lens:main"
+xkv-evaluate-diverse-controls = "xmodel_kv.cli.evaluate_diverse_controls:main"
+xkv-evaluate-diverse-refresh = "xmodel_kv.cli.evaluate_diverse_refresh:main"
+xkv-train-diverse-policy-capsule = "xmodel_kv.cli.train_diverse_policy_capsule:main"
+xkv-train-prompt-policy-capsule = "xmodel_kv.cli.train_prompt_policy_capsule:main"
+xkv-policy-triad = "xmodel_kv.cli.policy_triad:main"
+xkv-summarize-policy-triad = "xmodel_kv.cli.summarize_policy_triad:main"
+xkv-policy-tail = "xmodel_kv.cli.policy_tail:main"
+xkv-summarize-policy-tail = "xmodel_kv.cli.summarize_policy_tail:main"
+xkv-hotpot-agents = "xmodel_kv.cli.hotpot_agents:main"
+xkv-summarize-hotpot-agents = "xmodel_kv.cli.summarize_hotpot_agents:main"
+xkv-evaluate-handoff-scenarios = "xmodel_kv.cli.evaluate_handoff_scenarios:main"
+xkv-prepare-musique-handoff = "xmodel_kv.cli.prepare_musique_handoff:main"
+xkv-prepare-musique-chain-handoff = "xmodel_kv.cli.prepare_musique_chain_handoff:main"
+xkv-probe-kv-delta-rank = "xmodel_kv.cli.probe_kv_delta_rank:main"
+xkv-probe-semantic-kv-summary = "xmodel_kv.cli.probe_semantic_kv_summary:main"
+xkv-train-musique-semantic-handoff = "xmodel_kv.cli.train_musique_semantic_handoff:main"
+xkv-evaluate-musique-agent-a = "xmodel_kv.cli.evaluate_musique_agent_a:main"
+xkv-evaluate-musique-tail-transplant = "xmodel_kv.cli.evaluate_musique_tail_transplant:main"
+xkv-train-musique-soft-tail-capsule = "xmodel_kv.cli.train_musique_soft_tail_capsule:main"
+xkv-evaluate-musique-soft-tail-capsule = "xmodel_kv.cli.evaluate_musique_soft_tail_capsule:main"
+xkv-evaluate-hotpot-summary-transfer = "xmodel_kv.cli.evaluate_hotpot_summary_transfer:main"
+xkv-analyze-hotpot-summary-transfer = "xmodel_kv.cli.analyze_hotpot_summary_transfer:main"
+xkv-compare-hotpot-transfer-runs = "xmodel_kv.cli.compare_hotpot_transfer_runs:main"
+xkv-prepare-hotpot-disjoint-split = "xmodel_kv.cli.prepare_hotpot_disjoint_split:main"
+xkv-evaluate-hotpot-plaintext-baselines = "xmodel_kv.cli.evaluate_hotpot_plaintext_baselines:main"
+xkv-analyze-hotpot-baseline-matrix = "xmodel_kv.cli.analyze_hotpot_baseline_matrix:main"
+xkv-analyze-hotpot-competitors = "xmodel_kv.cli.analyze_hotpot_competitors:main"
+xkv-analyze-cacheblend-recovery = "xmodel_kv.cli.analyze_cacheblend_recovery:main"
+xkv-analyze-cacheblend-ratio-curve = "xmodel_kv.cli.analyze_cacheblend_ratio_curve:main"
+xkv-analyze-writer-scaling-factorial = "xmodel_kv.cli.analyze_writer_scaling_factorial:main"
+xkv-analyze-summary-transfer-variants = "xmodel_kv.cli.analyze_summary_transfer_variants:main"
+xkv-analyze-paired-transfer = "xmodel_kv.cli.analyze_paired_transfer:main"
+xkv-analyze-confidence-gate = "xmodel_kv.cli.analyze_confidence_gate:main"
+xkv-benchmark-capsule-codec = "xmodel_kv.cli.benchmark_capsule_codec:main"
+xkv-probe-demand-paged-kv = "xmodel_kv.cli.probe_demand_paged_kv:main"
+xkv-probe-precomputed-rag-chunks = "xmodel_kv.cli.probe_precomputed_rag_chunks:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xmodel_kv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

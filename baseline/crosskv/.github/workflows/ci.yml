@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install test environment
+        run: uv sync --extra test
+      - name: Run unit tests
+        env:
+          HF_HUB_OFFLINE: "1"
+          XKV_BFCL_ROOT: ${{ runner.temp }}/missing-bfcl
+          XKV_HOTPOT_DATASET: ${{ runner.temp }}/missing-hotpot.parquet
+          XKV_TEST_MODEL: ""
+        run: |
+          set +e
+          uv run pytest -q 2>&1 | tee pytest.log
+          pytest_status=${PIPESTATUS[0]}
+          set -e
+          if [[ ${pytest_status} -ne 0 ]]; then
+            failure_message="$(tail -n 80 pytest.log)"
+            failure_message="${failure_message//'%'/'%25'}"
+            failure_message="${failure_message//$'\r'/'%0D'}"
+            failure_message="${failure_message//$'\n'/'%0A'}"
+            echo "::error title=pytest failed::${failure_message}"
+            exit "${pytest_status}"
+          fi
+      - name: Build package
+        run: uv build
