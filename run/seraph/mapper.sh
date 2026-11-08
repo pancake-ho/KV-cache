@@ -84,6 +84,8 @@ command -v sbatch >/dev/null && command -v sinfo >/dev/null || { echo 'ERROR: Sl
 [[ -x "$python" ]] || { echo "ERROR: python not executable: $python" >&2; exit 2; }
 [[ -n "$(sinfo -h -p "$partition" -o '%P')" ]] || { echo 'ERROR: unavailable partition' >&2; exit 2; }
 mkdir -p "$result_dir/slurm"
+git -C "$ROOT" rev-parse HEAD > "$result_dir/commit.txt"
+git -C "$ROOT" status --short --branch > "$result_dir/git_status.txt"
 # Environment variables avoid command injection and preserve user-provided paths.
 job="$(sbatch --parsable --job-name="kv-mlp-${mode}" --partition="$partition" \
    --gres=gpu:1 --cpus-per-task="$cpus" --mem="$mem" --time="$walltime" \

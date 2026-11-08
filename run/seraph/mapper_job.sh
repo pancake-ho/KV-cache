@@ -10,12 +10,6 @@ scratch="${KV_MAPPER_SCRATCH}/${KV_MAPPER_TAG}_job${SLURM_JOB_ID}"
 kinds="${KV_MAPPER_KINDS//+/\,}"
 [[ ! -e "$scratch" ]] || { echo 'ERROR: scratch already exists' >&2; exit 2; }
 mkdir -p "$scratch"
-[[ -x "$KV_MAPPER_PYTHON" ]] || { echo 'ERROR: python missing on compute node' >&2; exit 2; }
-[[ "${CUDA_VISIBLE_DEVICES:-}" != '' ]] || { echo 'ERROR: Slurm did not assign a GPU' >&2; exit 2; }
-"$KV_MAPPER_PYTHON" -c 'import torch, transformers, safetensors; assert torch.cuda.is_available(), "no GPU"; print("CUDA:",torch.cuda.get_device_name(0),"Torch:",torch.__version__,"Transformers:",transformers.__version__)'
-nvidia-smi > "$KV_MAPPER_RESULT/nvidia-smi.txt"
-git -C "$ROOT" rev-parse HEAD > "$KV_MAPPER_RESULT/commit.txt"
-git -C "$ROOT" status --short --branch > "$KV_MAPPER_RESULT/git_status.txt"
 set +e
 status='FAILED'
 on_exit() {
@@ -36,6 +30,10 @@ on_exit() {
 }
 trap on_exit EXIT
 set -e
+[[ -x "$KV_MAPPER_PYTHON" ]] || { echo 'ERROR: python missing on compute node' >&2; exit 2; }
+[[ "${CUDA_VISIBLE_DEVICES:-}" != '' ]] || { echo 'ERROR: Slurm did not assign a GPU' >&2; exit 2; }
+"$KV_MAPPER_PYTHON" -c 'import torch, transformers, safetensors; assert torch.cuda.is_available(), "no GPU"; print("CUDA:",torch.cuda.get_device_name(0),"Torch:",torch.__version__,"Transformers:",transformers.__version__)'
+nvidia-smi > "$KV_MAPPER_RESULT/nvidia-smi.txt"
 if [[ "$KV_MAPPER_MODE" == train ]]; then
   mkdir -p "$KV_MAPPER_DIR"
   exec 9>"$KV_MAPPER_DIR/.train.lock"
