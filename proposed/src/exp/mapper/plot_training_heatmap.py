@@ -1,4 +1,4 @@
-"""Render K/V heatmaps from saved final-epoch mapper training MSE."""
+"""Render saved training MSE or a source-layer R² probe for the neural mapper."""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +12,12 @@ from matplotlib.colors import LogNorm, Normalize
 from matplotlib.ticker import FuncFormatter
 
 from .spec import MapperSpec
-from .training_metrics import HeadTrainingMetric, load_training_metrics, write_training_metrics_csv
+from .training_metrics import (
+    HeadTrainingMetric,
+    load_training_metrics,
+    score_source_layers,
+    write_training_metrics_csv,
+)
 
 
 PANELS = (("k", "K · RoPE stripped"), ("v", "V"))
@@ -105,25 +110,76 @@ def plot_training_heatmap(spec: MapperSpec, metrics: list[HeadTrainingMetric], o
         plt.close(fig)
 
 
+def plot_source_layer_r2(spec: MapperSpec, scores: np.ndarray, samples: int, output_dir: Path) -> None:
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    source, target = _model_name(spec.source_model), _model_name(spec.target_model)
+    cmap = matplotlib.colormaps["YlOrRd"].with_extremes(bad="#e7e7e7", under="#567fa3")
+    with plt.rc_context({"font.size": 8, "axes.linewidth": 0.55, "pdf.fonttype": 42}):
+        fig, axes = plt.subplots(1, 2, figsize=(7.1, 3.5), layout="constrained", sharex=True, sharey=True)
+        for index, (ax, label) in enumerate(zip(axes, ("K (RoPE stripped)", "V"))):
+            image = ax.imshow(np.ma.masked_invalid(scores[index]), cmap=cmap, vmin=0, vmax=1,
+                              origin="upper", interpolation="nearest", aspect="equal")
+            ax.set_title(f"({chr(97 + index)}) {label}", fontsize=9, fontweight="bold")
+            ax.set_xlabel(f"Target layer ({target})")
+            ax.set_xticks(range(0, spec.target_layers, 5))
+            ax.set_yticks(range(0, spec.source_layers, 5))
+            ax.tick_params(length=2.5, width=0.55)
+        axes[0].set_ylabel(f"Source layer ({source})")
+        has_negative = (scores < 0).any()
+        bar = fig.colorbar(image, ax=axes, shrink=0.81, pad=0.018, extend="min" if has_negative else "neither")
+        bar.set_label(r"Head-averaged $R^2$")
+        top_k = len(spec.selected_layers[0])
+        fig.suptitle(f"Fixed top-{top_k} MLP, one source layer varied\nCalibration ($N={samples:,}$)", fontsize=9)
+        caption = "Gray: unavailable or unselected. Other inputs fixed at their mean."
+        if has_negative:
+            caption += " Blue: negative $R^2$."
+        fig.supxlabel(caption, fontsize=7)
+        try:
+            for extension in ("png", "pdf"):
+                fig.savefig(output_dir / f"mlp_source_layer_r2.{extension}", dpi=300)
+        finally:
+            plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mapper-dir", required=True, type=Path)
-    parser.add_argument("--output-dir", required=True, type=Path, help="New directory for PNG, PDF and CSV")
+    parser.add_argument("--output-dir", required=True, type=Path, help="New directory for figures and metrics")
+    parser.add_argument("--source-dir", type=Path, help="Training source KV store, for the R² probe")
+    parser.add_argument("--target-dir", type=Path, help="Training target KV store, for the R² probe")
+    parser.add_argument("--samples", type=int, default=2048, help="Calibration observations for the R² probe")
+    parser.add_argument("--seed", type=int, default=2026, help="Calibration sampling seed for the R² probe")
     args = parser.parse_args()
+    if (args.source_dir is None) != (args.target_dir is None):
+        parser.error("provide both --source-dir and --target-dir for the R² probe")
     try:
-        spec, metrics = load_training_metrics(args.mapper_dir)
         if args.output_dir.exists():
             raise FileExistsError(f"Output directory already exists: {args.output_dir}")
         args.output_dir.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix=".mapper-heatmap-", dir=args.output_dir.parent) as temporary:
             staging = Path(temporary)
-            plot_training_heatmap(spec, metrics, staging)
-            write_training_metrics_csv(staging / "mlp_train_mse_cells.csv", metrics)
+            if args.source_dir is not None:
+                spec, scores, rows = score_source_layers(args.mapper_dir, args.source_dir, args.target_dir,
+                                                        args.samples, args.seed)
+                plot_source_layer_r2(spec, scores, len(rows), staging)
+                np.savez_compressed(staging / "source_layer_r2.npz", scores=scores,
+                                    source_model=spec.source_model, target_model=spec.target_model,
+                                    samples=len(rows), seed=args.seed, sample_rows=rows,
+                                    top_k=len(spec.selected_layers[0]),
+                                    method="fixed_mapper_source_only_mean_fill_calibration")
+                summary = f"Plotted {np.isfinite(scores).sum()} source–target K/V scores"
+            else:
+                spec, metrics = load_training_metrics(args.mapper_dir)
+                plot_training_heatmap(spec, metrics, staging)
+                write_training_metrics_csv(staging / "mlp_train_mse_cells.csv", metrics)
+                total = spec.target_layers * spec.target_kv_heads * len(PANELS)
+                summary = f"Plotted {len(metrics)}/{total} saved K/V metrics"
             staging.rename(args.output_dir)
-    except (OSError, TypeError, ValueError) as error:
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as error:
         parser.exit(1, f"Error: {error}\n")
-    total = spec.target_layers * spec.target_kv_heads * len(PANELS)
-    print(f"Plotted {len(metrics)}/{total} saved K/V metrics in {args.output_dir.resolve()}")
+    print(f"{summary} in {args.output_dir.resolve()}")
 
 
 if __name__ == "__main__":
