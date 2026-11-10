@@ -16,6 +16,7 @@ from proposed.src.models.qwen3 import QwenRuntime
 from proposed.src.serving.engine import ServingEngine
 from proposed.src.serving.request import Request
 from proposed.validation.semcache_smoke import replay, validate_multi_user, validate_reuse
+from proposed.validation.serving_metrics import performance_report
 from proposed.validation.workload import add_lora_requests, controlled_requests, multi_user_requests
 
 
@@ -36,6 +37,45 @@ class IdentityMapper:
     def map_cache(self, source_cache, **_kwargs):
         self.calls += 1
         return DynamicCache.from_legacy_cache(tuple((k.clone(), v.clone()) for k, v in source_cache))
+
+
+class PerformanceReportTests(unittest.TestCase):
+    def test_pairs_hits_with_the_same_baseline_requests_and_separates_memory(self):
+        def row(request_id, ttft, reused=0, stored=0):
+            return {
+                "request_id": request_id, "ttft_ms": ttft, "application_ms": ttft + 1,
+                "prompt_tokens": 10, "reused_prefix_tokens": reused,
+                "generated_ids": [1, 2], "resident_kv_bytes": stored,
+            }
+
+        def sample(rows, seconds, peak):
+            return (rows, {
+                "wall_seconds": seconds,
+                "peak_gpu_allocated_bytes": peak,
+                "peak_gpu_reserved_bytes": peak + 20,
+            })
+
+        full = sample([row("source", 10), row("hit", 20)], 2, 100)
+        raw = sample([row("source", 12, stored=80), row("hit", 10, reused=8, stored=80)], 1, 125)
+        packed = sample([row("source", 14, stored=25), row("hit", 12, reused=8, stored=25)], 1, 120)
+        report = performance_report({"full": [full], "semcache": [raw], "semcache_bitpack": [packed]})
+
+        cache = report["modes"]["semcache"]
+        self.assertEqual(cache["request_hit_rate_pct"], 50)
+        self.assertEqual(cache["prefix_token_reuse_pct"], 40)
+        self.assertEqual(cache["ttft_ms"]["p95"], 12)
+        self.assertEqual(cache["output_tokens_per_second"], 4)
+        vs_full = report["vs_full"]["semcache"]
+        self.assertEqual(vs_full["hit_ttft_mean_reduction_pct"], 50)
+        self.assertEqual(vs_full["peak_gpu_allocated_reduction_pct"], -25)
+        self.assertIsNone(vs_full["peak_resident_kv_reduction_pct"])
+        vs_raw = report["bitpack_vs_raw"]["semcache_bitpack"]
+        self.assertEqual(vs_raw["peak_resident_kv_reduction_pct"], 68.75)
+        self.assertEqual(vs_raw["first_token_agreement_pct"], 100)
+
+        bad_order = sample(list(reversed(raw[0])), 1, 125)
+        with self.assertRaisesRegex(ValueError, "identical ordered request IDs"):
+            performance_report({"full": [full], "semcache": [bad_order]})
 
 
 class IntegrationTests(unittest.TestCase):

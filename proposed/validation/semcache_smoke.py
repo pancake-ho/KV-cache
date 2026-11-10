@@ -11,6 +11,7 @@ from proposed.src.kv_transfer.base_model import BaseModelKVTransfer
 from proposed.src.serving.engine import ServingEngine
 
 from . import config
+from .serving_metrics import measure_replays, performance_report
 from .workload import add_lora_requests, controlled_requests, multi_user_requests
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -96,6 +97,9 @@ def main(argv=None):
     parser.add_argument("--suffix-tokens", type=int, default=24)
     parser.add_argument("--new-tokens", type=int, default=8)
     parser.add_argument("--cache-mib", type=int, default=512)
+    parser.add_argument(
+        "--benchmark-repeats", type=int, default=getattr(config, "BENCHMARK_REPEATS", 3),
+    )
     parser.add_argument("--allow-download", action="store_true")
     parser.add_argument("--multi-user", action="store_true", help="load the expanded profile from config.py")
     parser.add_argument("--compare-kv-bitpack", action="store_true",
@@ -113,6 +117,8 @@ def main(argv=None):
     if (not 4 <= args.prefix_tokens <= 4096 or not 1 <= args.suffix_tokens <= 4096
             or not 1 <= args.new_tokens <= 64 or args.cache_mib < 1):
         parser.error("require 4–4096 prefix tokens, 1–4096 suffix tokens, 1–64 new tokens and positive cache capacity")
+    if args.benchmark_repeats < 1:
+        parser.error("--benchmark-repeats must be positive")
     if args.multi_user and args.adapter:
         parser.error("--multi-user uses MULTI_USER_ADAPTERS from config.py")
     if args.adapter and (len(args.adapter) != 2 or len({name for name, _ in args.adapter}) != 2):
@@ -217,7 +223,19 @@ def main(argv=None):
         if adapters:
             requests = add_lora_requests(requests, [row["adapter_id"] for row in adapters])
     runtime.warmup()
-    modes = {"full": replay(runtime, requests, args.new_tokens)}
+    modes = {}
+    performance_samples = {}
+
+    def benchmark_mode(name, **options):
+        samples = measure_replays(
+            lambda: replay(runtime, requests, args.new_tokens, **options),
+            device=device, repeats=args.benchmark_repeats,
+        )
+        performance_samples[name] = samples
+        modes[name] = samples[0][0]
+        return modes[name]
+
+    benchmark_mode("full")
 
     mapper_paths = {}
     codec_comparison = {}
@@ -237,13 +255,9 @@ def main(argv=None):
             "mapper": mapper,
             "capacity_bytes": args.cache_mib << 20,
         }
-        rows = replay(runtime, requests, args.new_tokens, **replay_options)
-        modes[name] = rows
+        rows = benchmark_mode(name, **replay_options)
         if codec is not None:
-            # Warm the codec with the actual Qwen cache shapes before the measured replay.
-            replay(runtime, requests, args.new_tokens, codec=codec, **replay_options)
-            packed = replay(runtime, requests, args.new_tokens, codec=codec, **replay_options)
-            modes[f"{name}_bitpack"] = packed
+            packed = benchmark_mode(f"{name}_bitpack", codec=codec, **replay_options)
             codec_comparison[name] = {
                 "source_raw_bytes": rows[0]["resident_kv_bytes"],
                 "source_bitpack_bytes": packed[0]["resident_kv_bytes"],
@@ -270,7 +284,8 @@ def main(argv=None):
         for name, metrics in comparison.items():
             metrics["same_adapter_tokens_agree"] = modes[name][4]["generated_ids"] == modes["full"][4]["generated_ids"]
     report = {
-        "scope": "controlled sequential smoke; fixed generation budget; one trace per mode",
+        "scope": "controlled sequential benchmark; fixed generation budget; modes retain the first measured replay",
+        "benchmark_repeats": args.benchmark_repeats,
         "provenance": provenance, "model_revisions": revisions, "mapper_paths": mapper_paths,
         "profile": "multi_user" if args.multi_user else "smoke",
         "request_count": len(requests), "user_count": len({request.user_id for request in requests}),
@@ -282,19 +297,21 @@ def main(argv=None):
         "prefix_tokens": args.prefix_tokens, "suffix_tokens": args.suffix_tokens,
         "new_tokens": args.new_tokens, "cache_mib": args.cache_mib,
         "modes": modes, "comparison": comparison,
+        "performance": performance_report(performance_samples),
         "kv_codec": codec_info, "codec_comparison": codec_comparison,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
         handle.write("\n")
-    for name, rows in modes.items():
+    for name, samples in performance_samples.items():
         if name == "full":
             continue
-        if args.multi_user:
-            validate_multi_user(rows, args.prefix_tokens, expected)
-        else:
-            validate_reuse(rows, args.prefix_tokens)
+        for rows, _ in samples:
+            if args.multi_user:
+                validate_multi_user(rows, args.prefix_tokens, expected)
+            else:
+                validate_reuse(rows, args.prefix_tokens)
     print(f"Controlled replay complete: {args.output}")
 
 
