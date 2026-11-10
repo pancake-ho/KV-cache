@@ -16,7 +16,8 @@ LORA_ADAPTERS = {
 }
 
 # Use the same Slurm entry point for the expanded controlled trace.
-MULTI_USER = False
+MULTI_USER = True
+
 MODEL_06B = "Qwen/Qwen3-0.6B"
 MODEL_17B = "Qwen/Qwen3-1.7B"
 MODEL_4B = "Qwen/Qwen3-4B"

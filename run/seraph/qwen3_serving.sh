@@ -33,9 +33,9 @@ def path(value):
     return "" if value is None else str((config.REPO_ROOT / Path(value).expanduser()).resolve())
 
 
-mlp = path(config.MLP_DIR)
-ridge = path(config.RIDGE_DIR)
-if not mlp and not ridge:
+mlp = "" if config.MULTI_USER else path(config.MLP_DIR)
+ridge = "" if config.MULTI_USER else path(config.RIDGE_DIR)
+if not config.MULTI_USER and not (mlp or ridge):
     sys.exit("Set MLP_DIR or RIDGE_DIR in proposed/validation/config.py")
 if not config.MULTI_USER and len(config.LORA_ADAPTERS) not in (0, 2):
     sys.exit("Configure zero or two LoRA adapters")
@@ -79,10 +79,12 @@ trap 'printf "status=%s\nexit_code=%s\njob_id=%s\n" "$status" "$?" "$SLURM_JOB_I
 export TOKENIZERS_PARALLELISM=false
 "$SEMCACHE_PYTHON" -c 'import torch; assert torch.cuda.device_count() == 1, "Exactly one CUDA GPU is required"'
 
-local_root="/local_datasets/$USER/kv_mapper"
-mkdir -p "$local_root"
-staged=$(mktemp -d "$local_root/semcache_${SLURM_JOB_ID}_XXXXXX")
-echo "Staging mappers in $staged"
+if [[ -n "$SEMCACHE_MLP" || -n "$SEMCACHE_RIDGE" ]]; then
+    local_root="/local_datasets/$USER/kv_mapper"
+    mkdir -p "$local_root"
+    staged=$(mktemp -d "$local_root/semcache_${SLURM_JOB_ID}_XXXXXX")
+    echo "Staging mappers in $staged"
+fi
 
 if [[ -n "${SEMCACHE_MLP:-}" ]]; then
     test -s "$SEMCACHE_MLP/config.json"

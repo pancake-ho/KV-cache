@@ -51,8 +51,9 @@ def validate_reuse(rows, prefix_tokens):
 
 
 def validate_multi_user(rows, prefix_tokens, expected):
-    validate_reuse(rows[:3], prefix_tokens)
-    for row in rows[3:]:
+    if len(rows) != len(expected) or {row["request_id"] for row in rows} != set(expected):
+        raise RuntimeError("multi-user replay returned unexpected request IDs")
+    for row in rows:
         path, source_id, rejection = expected[row["request_id"]]
         prefix = prefix_tokens if source_id else 0
         if (row["path"] != path or row["reused_from"] != source_id
@@ -100,8 +101,14 @@ def main(argv=None):
     parser.add_argument("--compare-kv-bitpack", action="store_true",
                         help="also replay each mapper with a 5-bit prefix cache")
     parser.add_argument("--output", type=Path, required=True)
+
     args = parser.parse_args(argv)
-    if args.mlp_dir is None and args.ridge_dir is None:
+    if args.multi_user:
+        if not config.MULTI_USER_ADAPTERS:
+            parser.error("configure at least one entry in MULTI_USER_ADAPTERS")
+        if args.mlp_dir is not None or args.ridge_dir is not None:
+            parser.error("mapper arguments apply to the base-model smoke")
+    elif args.mlp_dir is None and args.ridge_dir is None:
         parser.error("provide at least one existing mapper directory")
     if (not 4 <= args.prefix_tokens <= 4096 or not 1 <= args.suffix_tokens <= 4096
             or not 1 <= args.new_tokens <= 64 or args.cache_mib < 1):
@@ -151,23 +158,24 @@ def main(argv=None):
     primary_pair = (source_id, target_id)
     revisions = {source_id: cfg["source_revision"], target_id: cfg["target_revision"]}
     extra_models = config.MULTI_USER_EXTRA_MODELS if args.multi_user else {}
-    extra_routes = config.MULTI_USER_EXTRA_RIDGE if args.multi_user else {}
-    adapter_specs = (config.MULTI_USER_ADAPTERS if args.multi_user else
-                     {name: (target_id, None, path) for name, path in args.adapter})
+    adapter_specs = (
+        config.MULTI_USER_ADAPTERS if args.multi_user
+        else {name: (target_id, None, path) for name, path in args.adapter}
+    )
     if revisions.keys() & extra_models.keys():
         parser.error("extra models must differ from the primary pair")
     revisions.update(extra_models)
-    for pair in extra_routes:
-        if (len(pair) != 2 or pair == primary_pair or pair[0] == pair[1]
-                or any(model_id not in revisions for model_id in pair)):
-            parser.error(f"invalid additional directed route: {pair}")
+
     for name, (model_id, dataset, path) in adapter_specs.items():
         if model_id not in revisions or (args.multi_user and dataset not in config.ADAPTER_DATASETS):
             parser.error(f"unknown model or dataset for LoRA {name}")
         if not all((Path(path) / file).is_file() for file in ("adapter_config.json", "adapter_model.safetensors")):
             parser.error(f"missing fitted LoRA checkpoint for {name}: {path}")
-    extra_mappers = tuple(load_mapper("ridge", LinearKVMapper, Path(path), pair)
-                          for pair, path in extra_routes.items())
+
+    if args.multi_user:
+        adapter_models = {model_id for model_id, _, _ in adapter_specs.values()}
+        revisions = {name: rev for name, rev in revisions.items() if name in adapter_models}
+
     local = not args.allow_download
     encoder = TinyBERTSemanticEncoder(
         revision=TINYBERT_REVISION, device="cpu", dtype="float32", local_files_only=local,
@@ -183,7 +191,7 @@ def main(argv=None):
         ).to(device).eval()
         for name, rev in revisions.items()
     }
-    requests = controlled_requests(source_id, target_id, tokenizers, args.prefix_tokens, args.suffix_tokens)
+    
     runtime = QwenRuntime(models, tokenizers, device)
     adapters = []
     for name, (model_id, dataset, path) in adapter_specs.items():
@@ -195,30 +203,39 @@ def main(argv=None):
                 "train_split": train_split, "heldout_split": heldout_split,
             }
         adapters.append(row)
+
     expected = {}
     if args.multi_user:
         requests, expected = multi_user_requests(
-            requests, tokenizers, args.prefix_tokens, args.suffix_tokens,
-            extra_models=extra_models, routes=extra_routes, adapters=adapter_specs,
+            (), tokenizers, args.prefix_tokens, args.suffix_tokens,
+            extra_models=(), routes=(), adapters=adapter_specs,
         )
-    elif adapters:
-        requests = add_lora_requests(requests, [row["adapter_id"] for row in adapters])
+    else:
+        requests = controlled_requests(
+            source_id, target_id, tokenizers, args.prefix_tokens, args.suffix_tokens,
+        )
+        if adapters:
+            requests = add_lora_requests(requests, [row["adapter_id"] for row in adapters])
     runtime.warmup()
     modes = {"full": replay(runtime, requests, args.new_tokens)}
 
     mapper_paths = {}
     codec_comparison = {}
-    for name, path, mapper_class in (
+    replay_modes = (("semcache", None, None),) if args.multi_user else (
         ("ridge", args.ridge_dir, LinearKVMapper),
         ("mlp", args.mlp_dir, NeuralKVMapper),
-    ):
-        if path is None:
+    )
+    for name, path, mapper_class in replay_modes:
+        mapper = None
+        if path is not None:
+            mapper = load_mapper(name, mapper_class, path, primary_pair)
+            mapper_paths[name] = str(path.resolve())
+        elif not args.multi_user:
             continue
-        mapper = load_mapper(name, mapper_class, path, primary_pair)
-        mapper_paths[name] = str(path.resolve())
         replay_options = {
-            "encoder": encoder, "mapper": mapper, "capacity_bytes": args.cache_mib << 20,
-            "additional_mappers": extra_mappers,
+            "encoder": encoder,
+            "mapper": mapper,
+            "capacity_bytes": args.cache_mib << 20,
         }
         rows = replay(runtime, requests, args.new_tokens, **replay_options)
         modes[name] = rows
@@ -257,10 +274,8 @@ def main(argv=None):
         "provenance": provenance, "model_revisions": revisions, "mapper_paths": mapper_paths,
         "profile": "multi_user" if args.multi_user else "smoke",
         "request_count": len(requests), "user_count": len({request.user_id for request in requests}),
-        "extra_ridge_routes": [
-            {"source": src_id, "target": tgt_id, "path": str(Path(path).resolve())}
-            for (src_id, tgt_id), path in extra_routes.items()
-        ],
+        "extra_ridge_routes": [],
+        "comparison_request_id": full_hit["request_id"],
         "semantic_encoder": encoder.metadata, "adapters": adapters,
         "torch": torch.__version__, "transformers": transformers.__version__,
         "gpu": torch.cuda.get_device_name(0), "dtype": "bfloat16",
