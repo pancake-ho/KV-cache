@@ -47,15 +47,24 @@ MULTI_USER_ADAPTERS = {
     # "hotpotqa": (MODEL_17B, "hotpotqa", Path("/path/to/hotpotqa/adapter_final")),
 }
 
+# 1.7B Adapters (현재는 내 폴더 환경에 맞춰져있기 때문에, 사용자별로 바꿔야함)
+MULTI_USER_ADAPTERS["medqa_17b"] = (
+    MODEL_17B,
+    "medqa",
+    Path("/data/surt321/models/lora_exp/phase3c_qwen3_17b_medqa_seed2026")
+    / "job_217810/medqa/seed2026/adapter_final",
+)
+
 # Optional additional fitted Ridge artifacts, keyed by directed model pair.
 MULTI_USER_EXTRA_RIDGE = {
     # (MODEL_06B, MODEL_17B): Path("/path/to/fitted_06b_to_17b_ridge"),
 }
+MULTI_USER_CROSS_MODEL_PROBES = (("medqa_17b", "medqa"),)
 
 PREFIX_TOKENS = 512
 SUFFIX_TOKENS = 24
 NEW_TOKENS = 8
 ALLOW_DOWNLOAD = False
-COMPARE_KV_BITPACK = False  # Run raw and 5-bit cache modes with the same mapper.
+COMPARE_KV_BITPACK = True  # Run raw and 5-bit cache modes with the same mapper.
 
 OUTPUT_ROOT = REPO_ROOT / "results/semcache"
