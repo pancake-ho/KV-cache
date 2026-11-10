@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=qwen3_serving
 #SBATCH --partition=batch_eebme_ugrad
-#SBATCH --nodelist=moana-y5
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=29G
