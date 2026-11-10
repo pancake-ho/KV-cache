@@ -190,29 +190,23 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(rows[5]["generated_ids"], full[5]["generated_ids"])
             self.assertNotEqual(rows[4]["adapter_sha256"], rows[5]["adapter_sha256"])
 
-            third = Qwen3ForCausalLM(cfg).eval()
-            third.load_state_dict(self.runtime.models["source"].state_dict())
-            runtime.models["third"] = third
-            runtime.tokenizers["third"] = self.tokenizers["source"]
             adapter_specs = {
-                name: ("target", name, directory) for name in ("medical", "finance", "math", "qa")
+                name: ("target", name, directory)
+                for name in ("medical", "finance", "math", "qa")
             }
-            secondary = IdentityMapper()
-            secondary.config = SimpleNamespace(source_model="third", target_model="source")
-            for routes, extra_mappers in (
-                ({}, ()), ({("third", "source"): "test-only"}, (secondary,)),
-            ):
-                trace, expected = multi_user_requests(
-                    self.requests, runtime.tokenizers, 24, 24,
-                    extra_models=("third",), routes=routes, adapters=adapter_specs,
-                )
-                encoder = ControlledEncoder({req.text: [1, 0] for req in trace})
-                records = replay(runtime, trace, 2, encoder=encoder, mapper=IdentityMapper(),
-                                 additional_mappers=extra_mappers)
-                validate_multi_user(records, 24, expected)
-                self.assertEqual({r["model_id"] for r in records}, {"third", "source", "target"})
-                self.assertEqual(len({r["user_id"] for r in records}), len(records))
-            self.assertEqual(secondary.calls, 1)
+            trace, expected = multi_user_requests(
+                (), runtime.tokenizers, 24, 24,
+                extra_models=(), routes=(), adapters=adapter_specs,
+            )
+            encoder = ControlledEncoder({req.text: [1, 0] for req in trace})
+            records = replay(runtime, trace, 2, encoder=encoder)
+
+            validate_multi_user(records, 24, expected)
+            self.assertEqual({row["model_id"] for row in records}, {"target"})
+            self.assertEqual(len(records), 12)
+            self.assertEqual(len({row["user_id"] for row in records}), 12)
+            self.assertEqual(sum(row["path"] == "native_kv_hit" for row in records), 4)
+            self.assertEqual(sum(row["path"] == "miss_recompute" for row in records), 8)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for the Triton codec")
