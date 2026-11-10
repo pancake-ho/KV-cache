@@ -17,7 +17,9 @@ from proposed.src.serving.engine import ServingEngine
 from proposed.src.serving.request import Request
 from proposed.validation.semcache_smoke import replay, validate_multi_user, validate_reuse
 from proposed.validation.serving_metrics import performance_report
-from proposed.validation.workload import add_lora_requests, controlled_requests, multi_user_requests
+from proposed.validation.workload import (
+    add_lora_requests, controlled_requests, multi_user_request_cases, multi_user_requests,
+)
 
 
 class CharTokenizer:
@@ -58,7 +60,10 @@ class PerformanceReportTests(unittest.TestCase):
         full = sample([row("source", 10), row("hit", 20)], 2, 100)
         raw = sample([row("source", 12, stored=80), row("hit", 10, reused=8, stored=80)], 1, 125)
         packed = sample([row("source", 14, stored=25), row("hit", 12, reused=8, stored=25)], 1, 120)
-        report = performance_report({"full": [full], "semcache": [raw], "semcache_bitpack": [packed]})
+        report = performance_report(
+            {"full": [full], "semcache": [raw], "semcache_bitpack": [packed]},
+            request_cases={"source": "cold_source", "hit": "same_model_adapter"},
+        )
 
         cache = report["modes"]["semcache"]
         self.assertEqual(cache["request_hit_rate_pct"], 50)
@@ -69,6 +74,8 @@ class PerformanceReportTests(unittest.TestCase):
         self.assertEqual(vs_full["hit_ttft_mean_reduction_pct"], 50)
         self.assertEqual(vs_full["peak_gpu_allocated_reduction_pct"], -25)
         self.assertIsNone(vs_full["peak_resident_kv_reduction_pct"])
+        self.assertEqual(vs_full["by_case"]["cold_source"]["hit_count"], 0)
+        self.assertEqual(vs_full["by_case"]["same_model_adapter"]["ttft_mean_reduction_pct"], 50)
         vs_raw = report["bitpack_vs_raw"]["semcache_bitpack"]
         self.assertEqual(vs_raw["peak_resident_kv_reduction_pct"], 68.75)
         self.assertEqual(vs_raw["first_token_agreement_pct"], 100)
@@ -247,6 +254,34 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(len({row["user_id"] for row in records}), 12)
             self.assertEqual(sum(row["path"] == "native_kv_hit" for row in records), 4)
             self.assertEqual(sum(row["path"] == "miss_recompute" for row in records), 8)
+
+            # Register a checkpoint on the other base and verify it is routed
+            # while its cached prefix is rejected by the target adapter.
+            small_base = Qwen3ForCausalLM(cfg)
+            small_base.name_or_path = "source"
+            small_adapter = get_peft_model(small_base, LoraConfig(
+                r=2, lora_alpha=2, target_modules=["v_proj"],
+                task_type="CAUSAL_LM", init_lora_weights=False,
+            ))
+            small_path = Path(directory) / "small"
+            small_adapter.save_pretrained(small_path)
+            runtime.adapters.load("source", "medical_small", small_path)
+            adapter_specs["medical_small"] = ("source", "medical", small_path)
+            mixed, expected = multi_user_requests(
+                (), runtime.tokenizers, 24, 24, extra_models=(), routes=(),
+                adapters=adapter_specs, cross_model_probes=(("medical_small", "medical"),),
+            )
+            encoder = ControlledEncoder({req.text: [1, 0] for req in mixed})
+            records = replay(runtime, mixed, 2, encoder=encoder)
+            validate_multi_user(records, 24, expected)
+            self.assertEqual({row["model_id"] for row in records}, {"source", "target"})
+            cases = multi_user_request_cases(mixed)
+            probe = records[-1]
+            self.assertEqual(cases[probe["request_id"]], "different_model")
+            self.assertGreater(probe["rejections"]["adapter_mismatch"], 0)
+            self.assertEqual(probe["forwarded_prefill_tokens"], probe["prompt_tokens"])
+            self.assertEqual(probe["generated_ids"], replay(runtime, mixed[-1:], 2)[0]["generated_ids"])
+
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for the Triton codec")

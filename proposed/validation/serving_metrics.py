@@ -1,5 +1,6 @@
 """Measure and compare the in-process serving workload."""
 
+from collections import defaultdict
 from math import ceil
 from statistics import fmean, median
 from time import perf_counter
@@ -76,11 +77,12 @@ def _summarize_mode(samples):
     }
 
 
-def _compare_modes(baseline, candidate, baseline_summary, candidate_summary):
+def _compare_modes(baseline, candidate, baseline_summary, candidate_summary, request_cases=None):
     hit_baseline = []
     hit_candidate = []
     first_token_agreements = 0
     all_token_agreements = 0
+    cases = defaultdict(list)
 
     for (reference_rows, _), (candidate_rows, _) in zip(baseline, candidate, strict=True):
         for reference, row in zip(reference_rows, candidate_rows, strict=True):
@@ -89,6 +91,8 @@ def _compare_modes(baseline, candidate, baseline_summary, candidate_summary):
             reference_ids, candidate_ids = reference["generated_ids"], row["generated_ids"]
             first_token_agreements += reference_ids[0] == candidate_ids[0]
             all_token_agreements += reference_ids == candidate_ids
+            if request_cases is not None:
+                cases[request_cases[row["request_id"]]].append((reference, row))
             if row["reused_prefix_tokens"] > 0:
                 hit_baseline.append(reference["ttft_ms"])
                 hit_candidate.append(row["ttft_ms"])
@@ -115,21 +119,39 @@ def _compare_modes(baseline, candidate, baseline_summary, candidate_summary):
     for metric in ("peak_gpu_allocated", "peak_gpu_reserved", "peak_resident_kv"):
         key = f"{metric}_bytes"
         comparisons[f"{metric}_reduction_pct"] = _reduction_pct(baseline_summary[key], candidate_summary[key])
+    if request_cases is not None:
+        comparisons["by_case"] = {}
+        for case, pairs in cases.items():
+            reference_ttft = _latency_stats([reference["ttft_ms"] for reference, _ in pairs])
+            candidate_ttft = _latency_stats([row["ttft_ms"] for _, row in pairs])
+            comparisons["by_case"][case] = {
+                "baseline_ttft_ms": reference_ttft,
+                "candidate_ttft_ms": candidate_ttft,
+                "ttft_mean_reduction_pct": _reduction_pct(reference_ttft["mean"], candidate_ttft["mean"]),
+                "hit_count": sum(row["reused_prefix_tokens"] > 0 for _, row in pairs),
+                "all_tokens_agreement_pct": 100 * sum(
+                    reference["generated_ids"] == row["generated_ids"] for reference, row in pairs
+                ) / len(pairs),
+            }
     return comparisons
 
 
-def performance_report(samples_by_mode):
+def performance_report(samples_by_mode, *, request_cases=None):
     """Keep whole-trace and paired cache-hit comparisons separate."""
     modes = {name: _summarize_mode(samples) for name, samples in samples_by_mode.items()}
     vs_full = {
-        name: _compare_modes(samples_by_mode["full"], samples, modes["full"], modes[name])
+        name: _compare_modes(
+            samples_by_mode["full"], samples, modes["full"], modes[name], request_cases,
+        )
         for name, samples in samples_by_mode.items() if name != "full"
     }
     bitpack_vs_raw = {}
     for name, samples in samples_by_mode.items():
         if name.endswith("_bitpack"):
             raw = name.removesuffix("_bitpack")
-            bitpack_vs_raw[name] = _compare_modes(samples_by_mode[raw], samples, modes[raw], modes[name])
+            bitpack_vs_raw[name] = _compare_modes(
+                samples_by_mode[raw], samples, modes[raw], modes[name], request_cases,
+            )
 
     return {
         "measurement": {

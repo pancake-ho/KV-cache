@@ -12,7 +12,9 @@ from proposed.src.serving.engine import ServingEngine
 
 from . import config
 from .serving_metrics import measure_replays, performance_report
-from .workload import add_lora_requests, controlled_requests, multi_user_requests
+from .workload import (
+    add_lora_requests, controlled_requests, multi_user_request_cases, multi_user_requests,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_CONFIG = ROOT / "baseline/crosskv/configs/figure2_qwen3_1p7b_4b.json"
@@ -211,11 +213,16 @@ def main(argv=None):
         adapters.append(row)
 
     expected = {}
+    request_cases = None
+    cross_model_probes = ()
     if args.multi_user:
+        cross_model_probes = getattr(config, "MULTI_USER_CROSS_MODEL_PROBES", ())
         requests, expected = multi_user_requests(
             (), tokenizers, args.prefix_tokens, args.suffix_tokens,
             extra_models=(), routes=(), adapters=adapter_specs,
+            cross_model_probes=cross_model_probes,
         )
+        request_cases = multi_user_request_cases(requests)
     else:
         requests = controlled_requests(
             source_id, target_id, tokenizers, args.prefix_tokens, args.suffix_tokens,
@@ -297,9 +304,19 @@ def main(argv=None):
         "prefix_tokens": args.prefix_tokens, "suffix_tokens": args.suffix_tokens,
         "new_tokens": args.new_tokens, "cache_mib": args.cache_mib,
         "modes": modes, "comparison": comparison,
-        "performance": performance_report(performance_samples),
+        "performance": performance_report(performance_samples, request_cases=request_cases),
         "kv_codec": codec_info, "codec_comparison": codec_comparison,
     }
+    if request_cases is not None:
+        report["request_cases"] = request_cases
+        report["cross_model_probes"] = [
+            {
+                "source_model_id": adapter_specs[source][0], "source_adapter_id": source,
+                "target_model_id": adapter_specs[target][0], "target_adapter_id": target,
+                "target_request_id": f"cross-model-probe-{index}-hit",
+            }
+            for index, (source, target) in enumerate(cross_model_probes)
+        ]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)

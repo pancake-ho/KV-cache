@@ -60,28 +60,34 @@ def add_lora_requests(requests, adapter_ids):
     )
 
 
-def multi_user_requests(primary, tokenizers, prefix_tokens, suffix_tokens, *, extra_models, routes, adapters):
+def multi_user_requests(
+    primary, tokenizers, prefix_tokens, suffix_tokens, *, extra_models, routes, adapters,
+    cross_model_probes=(),
+):
     """Build independent groups for model and adapter reuse controls."""
     requests = []
     expected = {}
 
-    def pair(tag, source_id, target_id, *, adapter_id=None, unavailable=False):
+    def pair(tag, source_id, target_id, *, source_adapter, target_adapter):
         source, hit, _ = controlled_requests(source_id, target_id, tokenizers, prefix_tokens, suffix_tokens)
         source = replace(source, request_id=f"{tag}-source", user_id=f"{tag}-user-a",
-                         share_group=tag, adapter_id=adapter_id)
+                         share_group=tag, adapter_id=source_adapter)
         hit = replace(hit, request_id=f"{tag}-hit", user_id=f"{tag}-user-b",
-                      share_group=tag, adapter_id=adapter_id)
+                      share_group=tag, adapter_id=target_adapter)
         requests.extend((source, hit))
         expected[source.request_id] = ("miss_recompute", None, None)
-        if unavailable:
-            expected[hit.request_id] = ("miss_recompute", None, "unsupported_model_pair")
+        if source_id == target_id:
+            expected[hit.request_id] = ("native_kv_hit", source.request_id, None)
         else:
-            path = "native_kv_hit" if source_id == target_id else "cross_model_kv_hit"
-            expected[hit.request_id] = (path, source.request_id, None)
+            # The physical adapter check precedes the model-pair check.
+            expected[hit.request_id] = ("miss_recompute", None, "adapter_mismatch")
         return hit
 
     for adapter_id, (model_id, _, _) in adapters.items():
-        hit = pair(f"adapter-{adapter_id}", model_id, model_id, adapter_id=adapter_id)
+        hit = pair(
+            f"adapter-{adapter_id}", model_id, model_id,
+            source_adapter=adapter_id, target_adapter=adapter_id,
+        )
         other = next((name for name, (base_id, _, _) in adapters.items()
                       if name != adapter_id and base_id == model_id), None)
         if other is not None:
@@ -89,4 +95,34 @@ def multi_user_requests(primary, tokenizers, prefix_tokens, suffix_tokens, *, ex
                                user_id=f"{hit.share_group}-user-c", adapter_id=other)
             requests.append(mismatch)
             expected[mismatch.request_id] = ("miss_recompute", None, "adapter_mismatch")
+    for index, (source_adapter, target_adapter) in enumerate(cross_model_probes):
+        if source_adapter not in adapters or target_adapter not in adapters:
+            raise ValueError("cross-model probes require two registered adapter IDs")
+        source_model = adapters[source_adapter][0]
+        target_model = adapters[target_adapter][0]
+        if source_model == target_model:
+            raise ValueError("cross-model probe adapters must belong to different base models")
+        pair(
+            f"cross-model-probe-{index}", source_model, target_model,
+            source_adapter=source_adapter, target_adapter=target_adapter,
+        )
+
     return tuple(requests), expected
+
+
+def multi_user_request_cases(requests):
+    """Label each request by its relation to its group's cache source."""
+    sources = {}
+    cases = {}
+    for request in requests:
+        source = sources.setdefault(request.share_group, request)
+        if request is source:
+            case = "cold_source"
+        elif request.model_id != source.model_id:
+            case = "different_model"
+        elif request.adapter_id != source.adapter_id:
+            case = "different_adapter"
+        else:
+            case = "same_model_adapter"
+        cases[request.request_id] = case
+    return cases
