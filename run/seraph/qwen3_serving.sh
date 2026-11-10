@@ -48,6 +48,8 @@ for name, directory in config.LORA_ADAPTERS.items():
     args.extend(("--adapter", name, path(directory)))
 if config.ALLOW_DOWNLOAD:
     args.append("--allow-download")
+if config.COMPARE_KV_BITPACK:
+    args.append("--compare-kv-bitpack")
 
 fields = [path(config.OUTPUT_ROOT), mlp, ridge, *args]
 sys.stdout.buffer.write(b"".join(os.fsencode(field) + b"\0" for field in fields))

@@ -52,5 +52,7 @@ class QwenRuntime:
 
     @staticmethod
     @torch.inference_mode()
-    def copy_cache(layers):
-        return DynamicCache.from_legacy_cache(tuple((k.clone(), v.clone()) for k, v in layers))
+    def copy_cache(layers, *, clone=True):
+        if clone:
+            layers = tuple((k.clone(), v.clone()) for k, v in layers)
+        return DynamicCache.from_legacy_cache(layers)

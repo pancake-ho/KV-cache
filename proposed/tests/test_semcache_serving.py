@@ -98,6 +98,37 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(row["generated_ids"], ServingEngine(self.runtime).serve(same_model, 3)["generated_ids"])
         self.assertTrue(all(torch.equal(a, b) for a, b in zip(before, (t for p in stored for t in p))))
 
+    def test_codec_restores_before_both_reuse_paths(self):
+        class CodecFixture:
+            encoded_size = staticmethod(lambda _layers: 2)
+
+            def __init__(self):
+                self.decodes = 0
+
+            def encode(self, layers):
+                return (SimpleNamespace(dense=tuple((k.clone(), v.clone()) for k, v in layers)),)
+
+            def decode(self, packed):
+                self.decodes += 1
+                return tuple((k.clone(), v.clone()) for k, v in packed[0].dense)
+
+        source, hit, _ = self.requests
+        same_model = Request("same-model", hit.user_id, source.model_id, hit.text, hit.token_ids)
+        codec = CodecFixture()
+        cache = PrefixCache(SemanticIndex(self.encoder), 2, codec=codec)
+        mapper = IdentityMapper()
+        engine = ServingEngine(self.runtime, cache=cache, transfer=BaseModelKVTransfer(mapper))
+        engine.serve(source, 3)
+        self.assertEqual(cache.bytes, 2)
+        packed = cache.entries[source.request_id].layers
+        for request, path in ((hit, "cross_model_kv_hit"), (same_model, "native_kv_hit")):
+            row = engine.serve(request, 3)
+            self.assertEqual(row["path"], path)
+            self.assertEqual(row["generated_ids"], ServingEngine(self.runtime).serve(request, 3)["generated_ids"])
+        self.assertEqual(mapper.calls, 1)
+        self.assertEqual(codec.decodes, 2)
+        self.assertIs(cache.entries[source.request_id].layers, packed)
+
     def test_capacity_and_share_group(self):
         source, hit, miss = self.requests
         entry_bytes = 24 * 2 * 2 * 2 * 8 * 4
@@ -158,6 +189,32 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(rows[4]["generated_ids"], full[4]["generated_ids"])
             self.assertEqual(rows[5]["generated_ids"], full[5]["generated_ids"])
             self.assertNotEqual(rows[4]["adapter_sha256"], rows[5]["adapter_sha256"])
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for the Triton codec")
+class KVBitpackTests(unittest.TestCase):
+    def test_cuda_round_trip_against_reference(self):
+        from proposed.src.cache.kv_bitpack import KVBitpackCodec
+
+        generator = torch.Generator(device="cuda").manual_seed(2026)
+        codec = KVBitpackCodec()
+        for tokens, heads, head_dim in ((1, 8, 128), (13, 8, 128), (13, 3, 8)):
+            with self.subTest(tokens=tokens, heads=heads, head_dim=head_dim):
+                shape = (1, tokens, heads, head_dim)
+                k = torch.randn(shape, generator=generator, device="cuda", dtype=torch.bfloat16).transpose(1, 2)
+                v = torch.randn(shape, generator=generator, device="cuda", dtype=torch.bfloat16).transpose(1, 2).contiguous()
+                k[:, :, 0, :] = 0
+                packed, = codec.encode(((k, v),))
+                self.assertEqual(codec.encoded_size(((k, v),)), packed.payload.nbytes + packed.scales.nbytes)
+                (decoded_k, decoded_v), = codec.decode((packed,))
+                for raw, restored in ((k, decoded_k), (v, decoded_v)):
+                    rows = raw.float().transpose(1, 2).reshape(tokens, heads * head_dim)
+                    scale = rows.abs().amax(dim=-1, keepdim=True)
+                    factor = torch.full_like(scale, 15) / torch.where(scale > 0, scale, 1)
+                    symbols = (rows * factor + 15).round()
+                    restored_rows = ((symbols - 15) / torch.full_like(symbols, 15)) * scale
+                    expected = restored_rows.reshape(shape).transpose(1, 2).to(raw.dtype)
+                    torch.testing.assert_close(restored, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

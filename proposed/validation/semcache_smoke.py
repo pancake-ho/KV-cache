@@ -17,12 +17,12 @@ MODEL_CONFIG = ROOT / "baseline/crosskv/configs/figure2_qwen3_1p7b_4b.json"
 TINYBERT_REVISION = "34707a33cd59a94ecde241ac209bf35103691b43"
 
 
-def replay(runtime, requests, budget, *, encoder=None, mapper=None, capacity_bytes=256 << 20):
+def replay(runtime, requests, budget, *, encoder=None, mapper=None, capacity_bytes=256 << 20, codec=None):
     cache = None
     if encoder is not None:
         from semcache.edgelora.r5_semantic_index import SemanticIndex
 
-        cache = PrefixCache(SemanticIndex(encoder, clusters=1), capacity_bytes)
+        cache = PrefixCache(SemanticIndex(encoder, clusters=1), capacity_bytes, codec=codec)
     transfer = BaseModelKVTransfer(mapper) if mapper is not None else None
     engine = ServingEngine(runtime, cache=cache, transfer=transfer)
     return [engine.serve(req, budget) for req in requests]
@@ -71,6 +71,8 @@ def main(argv=None):
     parser.add_argument("--new-tokens", type=int, default=8)
     parser.add_argument("--cache-mib", type=int, default=512)
     parser.add_argument("--allow-download", action="store_true")
+    parser.add_argument("--compare-kv-bitpack", action="store_true",
+                        help="also replay each mapper with a 5-bit prefix cache")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.mlp_dir is None and args.ridge_dir is None:
@@ -104,6 +106,16 @@ def main(argv=None):
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise RuntimeError("allocate exactly one CUDA GPU for the serving pilot")
 
+    codec = None
+    codec_info = None
+    if args.compare_kv_bitpack:
+        import triton
+
+        from proposed.src.cache.kv_bitpack import CODEC_ID, KVBitpackCodec
+
+        codec = KVBitpackCodec()
+        codec_info = {"id": CODEC_ID, "triton": triton.__version__}
+
     device = "cuda:0"
     torch.backends.cuda.matmul.allow_tf32 = False
     cfg = json.loads(MODEL_CONFIG.read_text(encoding="utf-8"))
@@ -133,6 +145,7 @@ def main(argv=None):
     modes = {"full": replay(runtime, requests, args.new_tokens)}
 
     mapper_paths = {}
+    codec_comparison = {}
     for name, path, mapper_class in (
         ("ridge", args.ridge_dir, LinearKVMapper),
         ("mlp", args.mlp_dir, NeuralKVMapper),
@@ -148,10 +161,26 @@ def main(argv=None):
         else:
             mapper.assert_complete()
         mapper_paths[name] = str(path.resolve())
-        rows = replay(runtime, requests, args.new_tokens, encoder=encoder, mapper=mapper,
-                      capacity_bytes=args.cache_mib << 20)
+        replay_options = {"encoder": encoder, "mapper": mapper, "capacity_bytes": args.cache_mib << 20}
+        rows = replay(runtime, requests, args.new_tokens, **replay_options)
         modes[name] = rows
-        del mapper
+        if codec is not None:
+            # Warm the codec with the actual Qwen cache shapes before the measured replay.
+            replay(runtime, requests, args.new_tokens, codec=codec, **replay_options)
+            packed = replay(runtime, requests, args.new_tokens, codec=codec, **replay_options)
+            modes[f"{name}_bitpack"] = packed
+            codec_comparison[name] = {
+                "source_raw_bytes": rows[0]["resident_kv_bytes"],
+                "source_bitpack_bytes": packed[0]["resident_kv_bytes"],
+                "source_encode_ms": packed[0]["cache_encode_ms"],
+                "target_decode_ms": packed[1]["cache_decode_ms"],
+                "target_ttft_delta_ms": packed[1]["ttft_ms"] - rows[1]["ttft_ms"],
+                "generated_ids_agree_by_request": {
+                    raw["request_id"]: raw["generated_ids"] == compressed["generated_ids"]
+                    for raw, compressed in zip(rows, packed, strict=True)
+                },
+            }
+        del mapper, replay_options
 
     full_hit = modes["full"][1]
     comparison = {
@@ -174,6 +203,7 @@ def main(argv=None):
         "prefix_tokens": args.prefix_tokens, "suffix_tokens": args.suffix_tokens,
         "new_tokens": args.new_tokens, "cache_mib": args.cache_mib,
         "modes": modes, "comparison": comparison,
+        "kv_codec": codec_info, "codec_comparison": codec_comparison,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as handle:

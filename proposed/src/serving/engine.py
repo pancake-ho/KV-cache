@@ -25,6 +25,7 @@ class ServingEngine:
 
     def _serve(self, request, budget, model, adapter_sha256, started):
         cache = self.cache
+        compressed = cache is not None and cache.codec is not None
         if len(request.token_ids) + budget > model.config.max_position_embeddings:
             raise ValueError("prompt and generation exceed model context")
 
@@ -37,19 +38,28 @@ class ServingEngine:
         past = None
         map_ms = 0.0
         cache_copy_ms = 0.0
+        cache_decode_ms = 0.0
         path = "full_recompute" if cache is None else "miss_recompute"
         if entry is not None:
             prefix = len(entry.request.token_ids)
+            if compressed:
+                tick = perf_counter()
+                layers = cache.restore(entry)
+                self.runtime.sync()
+                cache_decode_ms = elapsed_ms(tick)
+            else:
+                layers = entry.layers
             tick = perf_counter()
             if entry.request.model_id == request.model_id:
-                past = self.runtime.copy_cache(entry.layers)
+                past = self.runtime.copy_cache(layers, clone=not compressed)
                 path = "native_kv_hit"
             else:
                 past = self.transfer.map_cache(
-                    entry.layers, source=entry.request, target=request,
+                    layers, source=entry.request, target=request,
                     source_model=self.runtime.models[entry.request.model_id], target_model=model,
                 )
                 path = "cross_model_kv_hit"
+            del layers
             self.runtime.layers(model, past, prefix)
             self.runtime.sync()
             if path == "cross_model_kv_hit":
@@ -104,6 +114,8 @@ class ServingEngine:
             "mapping_ms": map_ms, "same_model_copy_ms": cache_copy_ms,
             "prefill_ms": prefill_ms, "ttft_ms": ttft_ms, "decode_ms": decode_ms,
             "snapshot_ms": snapshot_ms, "admission_ms": admission_ms,
+            "cache_encode_ms": snapshot_ms if compressed and snapshot is not None else 0.0,
+            "cache_decode_ms": cache_decode_ms,
             "application_ms": elapsed_ms(started),
             "resident_kv_bytes": cache.bytes if cache else 0,
         }

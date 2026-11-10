@@ -19,5 +19,6 @@ PREFIX_TOKENS = 512
 SUFFIX_TOKENS = 24
 NEW_TOKENS = 8
 ALLOW_DOWNLOAD = False
+COMPARE_KV_BITPACK = False  # Run raw and 5-bit cache modes with the same mapper.
 
 OUTPUT_ROOT = REPO_ROOT / "results/semcache"

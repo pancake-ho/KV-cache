@@ -12,13 +12,15 @@ from ..serving.request import Request
 if TYPE_CHECKING:
     from torch import Tensor
 
+    from .kv_bitpack import KVBitpackCodec, PackedLayer
+
 Layers = tuple[tuple["Tensor", "Tensor"], ...]
 
 
 @dataclass(frozen=True)
 class Entry:
     request: Request
-    layers: Layers
+    layers: Layers | tuple[PackedLayer, ...]
     size_bytes: int
     adapter_sha256: str | None
 
@@ -37,11 +39,12 @@ class Lookup:
 class PrefixCache:
     """One process, exact zero-based prefixes and byte-bounded LRU."""
 
-    def __init__(self, index, capacity_bytes: int):
+    def __init__(self, index, capacity_bytes: int, *, codec: KVBitpackCodec | None = None):
         if capacity_bytes < 1:
             raise ValueError("cache capacity must be positive")
         self.index = index
         self.capacity_bytes = capacity_bytes
+        self.codec = codec
         self.entries: OrderedDict[str, Entry] = OrderedDict()
         self.bytes = 0
 
@@ -78,12 +81,23 @@ class PrefixCache:
                       (perf_counter() - start) * 1000)
 
     def snapshot(self, request: Request, layers: Layers, adapter_sha256: str | None = None) -> Entry | None:
-        size = sum(t.numel() * t.element_size() for pair in layers for t in pair)
-        if size > self.capacity_bytes or len(request.token_ids) < 3:
+        if len(request.token_ids) < 3:
             return None
-        # Freeze the prefill before the request's DynamicCache grows during decode.
-        owned = tuple((k.detach().clone(), v.detach().clone()) for k, v in layers)
+        size = (self.codec.encoded_size(layers) if self.codec is not None else
+                sum(t.numel() * t.element_size() for pair in layers for t in pair))
+        if size > self.capacity_bytes:
+            return None
+        # Own an immutable prefill snapshot before the request's DynamicCache grows.
+        if self.codec is None:
+            owned = tuple((k.detach().clone(), v.detach().clone()) for k, v in layers)
+        else:
+            owned = self.codec.encode(layers)
         return Entry(request, owned, size, adapter_sha256)
+
+    def restore(self, entry: Entry) -> Layers:
+        if self.codec is None:
+            return entry.layers
+        return self.codec.decode(entry.layers)
 
     def admit(self, entry: Entry, cluster_id: int) -> None:
         if not 0 < entry.size_bytes <= self.capacity_bytes:
