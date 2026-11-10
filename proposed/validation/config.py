@@ -21,11 +21,3 @@ NEW_TOKENS = 8
 ALLOW_DOWNLOAD = False
 
 OUTPUT_ROOT = REPO_ROOT / "results/semcache"
-SLURM_ARGS = (
-    "--partition=batch_eebme_ugrad",
-    "--nodelist=moana-y5",
-    "--gres=gpu:1",
-    "--cpus-per-task=8",
-    "--mem=29G",
-    "--time=01:00:00",
-)
