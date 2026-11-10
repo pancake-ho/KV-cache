@@ -58,3 +58,43 @@ def add_lora_requests(requests, adapter_ids):
         replace(hit, request_id="lora-same", user_id="user-e", adapter_id=adapter_ids[0]),
         replace(hit, request_id="lora-other", user_id="user-f", adapter_id=adapter_ids[1]),
     )
+
+
+def multi_user_requests(primary, tokenizers, prefix_tokens, suffix_tokens, *, extra_models, routes, adapters):
+    """Build independent groups for model and adapter reuse controls."""
+    requests = list(primary)
+    expected = {}
+
+    def pair(tag, source_id, target_id, *, adapter_id=None, unavailable=False):
+        source, hit, _ = controlled_requests(source_id, target_id, tokenizers, prefix_tokens, suffix_tokens)
+        source = replace(source, request_id=f"{tag}-source", user_id=f"{tag}-user-a",
+                         share_group=tag, adapter_id=adapter_id)
+        hit = replace(hit, request_id=f"{tag}-hit", user_id=f"{tag}-user-b",
+                      share_group=tag, adapter_id=adapter_id)
+        requests.extend((source, hit))
+        expected[source.request_id] = ("miss_recompute", None, None)
+        if unavailable:
+            expected[hit.request_id] = ("miss_recompute", None, "unsupported_model_pair")
+        else:
+            path = "native_kv_hit" if source_id == target_id else "cross_model_kv_hit"
+            expected[hit.request_id] = (path, source.request_id, None)
+        return hit
+
+    for model_id in extra_models:
+        pair(f"model-{model_id}", model_id, model_id)
+        destination = primary[0].model_id
+        if (model_id, destination) not in routes:
+            pair(f"unsupported-{model_id}", model_id, destination, unavailable=True)
+    for index, (source_id, target_id) in enumerate(routes):
+        pair(f"route-{index}", source_id, target_id)
+
+    for adapter_id, (model_id, _, _) in adapters.items():
+        hit = pair(f"adapter-{adapter_id}", model_id, model_id, adapter_id=adapter_id)
+        other = next((name for name, (base_id, _, _) in adapters.items()
+                      if name != adapter_id and base_id == model_id), None)
+        if other is not None:
+            mismatch = replace(hit, request_id=f"{hit.share_group}-mismatch",
+                               user_id=f"{hit.share_group}-user-c", adapter_id=other)
+            requests.append(mismatch)
+            expected[mismatch.request_id] = ("miss_recompute", None, "adapter_mismatch")
+    return tuple(requests), expected

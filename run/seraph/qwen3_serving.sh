@@ -3,7 +3,7 @@
 #SBATCH --partition=batch_eebme_ugrad
 #SBATCH --nodelist=moana-y5
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=29G
 #SBATCH --time=01:00:00
 #SBATCH --output=logs/%x-%j.out
@@ -15,7 +15,8 @@ cd "${SLURM_SUBMIT_DIR:?submit from the repository root}"
 
 conda_base=$(conda info --base)
 source "$conda_base/etc/profile.d/conda.sh"
-conda activate semcache-qwen
+conda activate lab
+
 set -u
 SEMCACHE_PYTHON=$(command -v python)
 
@@ -36,7 +37,7 @@ mlp = path(config.MLP_DIR)
 ridge = path(config.RIDGE_DIR)
 if not mlp and not ridge:
     sys.exit("Set MLP_DIR or RIDGE_DIR in proposed/validation/config.py")
-if len(config.LORA_ADAPTERS) not in (0, 2):
+if not config.MULTI_USER and len(config.LORA_ADAPTERS) not in (0, 2):
     sys.exit("Configure zero or two LoRA adapters")
 
 args = [
@@ -44,8 +45,11 @@ args = [
     "--suffix-tokens", str(config.SUFFIX_TOKENS),
     "--new-tokens", str(config.NEW_TOKENS),
 ]
-for name, directory in config.LORA_ADAPTERS.items():
-    args.extend(("--adapter", name, path(directory)))
+if config.MULTI_USER:
+    args.append("--multi-user")
+else:
+    for name, directory in config.LORA_ADAPTERS.items():
+        args.extend(("--adapter", name, path(directory)))
 if config.ALLOW_DOWNLOAD:
     args.append("--allow-download")
 if config.COMPARE_KV_BITPACK:

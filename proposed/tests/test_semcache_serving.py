@@ -15,8 +15,8 @@ from proposed.src.kv_transfer.base_model import BaseModelKVTransfer
 from proposed.src.models.qwen3 import QwenRuntime
 from proposed.src.serving.engine import ServingEngine
 from proposed.src.serving.request import Request
-from proposed.validation.semcache_smoke import replay, validate_reuse
-from proposed.validation.workload import add_lora_requests, controlled_requests
+from proposed.validation.semcache_smoke import replay, validate_multi_user, validate_reuse
+from proposed.validation.workload import add_lora_requests, controlled_requests, multi_user_requests
 
 
 class CharTokenizer:
@@ -160,7 +160,7 @@ class IntegrationTests(unittest.TestCase):
         runtime = QwenRuntime({"source": source, "target": target}, self.tokenizers, "cpu")
         base_logits = runtime.forward(target, self.requests[1].token_ids, 0).logits
         with tempfile.TemporaryDirectory() as directory:
-            for index, name in enumerate(("medical", "finance")):
+            for index, name in enumerate(("medical", "finance", "math", "qa")):
                 base = Qwen3ForCausalLM(cfg)
                 base.name_or_path = "target"
                 peft_model = get_peft_model(base, LoraConfig(
@@ -189,6 +189,30 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(rows[4]["generated_ids"], full[4]["generated_ids"])
             self.assertEqual(rows[5]["generated_ids"], full[5]["generated_ids"])
             self.assertNotEqual(rows[4]["adapter_sha256"], rows[5]["adapter_sha256"])
+
+            third = Qwen3ForCausalLM(cfg).eval()
+            third.load_state_dict(self.runtime.models["source"].state_dict())
+            runtime.models["third"] = third
+            runtime.tokenizers["third"] = self.tokenizers["source"]
+            adapter_specs = {
+                name: ("target", name, directory) for name in ("medical", "finance", "math", "qa")
+            }
+            secondary = IdentityMapper()
+            secondary.config = SimpleNamespace(source_model="third", target_model="source")
+            for routes, extra_mappers in (
+                ({}, ()), ({("third", "source"): "test-only"}, (secondary,)),
+            ):
+                trace, expected = multi_user_requests(
+                    self.requests, runtime.tokenizers, 24, 24,
+                    extra_models=("third",), routes=routes, adapters=adapter_specs,
+                )
+                encoder = ControlledEncoder({req.text: [1, 0] for req in trace})
+                records = replay(runtime, trace, 2, encoder=encoder, mapper=IdentityMapper(),
+                                 additional_mappers=extra_mappers)
+                validate_multi_user(records, 24, expected)
+                self.assertEqual({r["model_id"] for r in records}, {"third", "source", "target"})
+                self.assertEqual(len({r["user_id"] for r in records}), len(records))
+            self.assertEqual(secondary.calls, 1)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for the Triton codec")

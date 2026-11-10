@@ -93,6 +93,31 @@ when applicable. The report captures routing and timing for one controlled
 trace. A break-even estimate or a generation-quality comparison requires a
 separate benchmark.
 
+## Expanded multi-user trace
+
+Set `MULTI_USER = True` in `proposed/validation/config.py` and submit the same
+Slurm script. This profile adds the pinned Qwen3-0.6B model to the existing
+1.7B/4B pair. It replays sequential requests with distinct user IDs, testing
+native cross-user reuse, registered cross-model reuse, missing-route fallback,
+and both same-adapter reuse and different-adapter recomputation.
+
+`MULTI_USER_ADAPTERS` points to the existing Qwen3-4B Phase 3C checkpoint
+locations for MedQA, MedMCQA, FPB and FiQA-SA. The job checks these paths before
+loading the models. `ADAPTER_DATASETS` records dataset provenance and includes
+GSM8K and HotpotQA as options for separately trained adapters. Add their local
+checkpoint directories to `MULTI_USER_ADAPTERS` after training. This runner
+uses a controlled shared-prefix trace and loads existing adapter weights.
+
+The 1.7B→4B mapper is still selected by `MLP_DIR` or `RIDGE_DIR`. To test an
+additional directed route in the same cache, register a fitted Ridge artifact
+in `MULTI_USER_EXTRA_RIDGE`, for example 0.6B→1.7B. Use a compute-node-readable
+path. The primary pair is staged by the shell runner. Additional route artifacts
+are loaded from the configured paths.
+
+The report records the enabled models, adapter datasets, additional routes and
+user/request counts. Set `ALLOW_DOWNLOAD = True` if the added model revision is
+missing locally and the compute node can access Hugging Face.
+
 ## Optional 5-bit prefix KV compression
 
 The uploaded QKV Bitpack V2.1 implements 5-bit packing for OPT-350m LoRA Q/K/V
