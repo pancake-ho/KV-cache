@@ -1,4 +1,1 @@
-This Paper was not submitted. Specific details will be provided after presentation.
-
-logs/
-results/
+This Paper was not submitted. Thus, specific details will be provided after presentation.
