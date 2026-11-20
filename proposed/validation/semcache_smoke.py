@@ -1,5 +1,6 @@
 """Replay controlled Qwen3 and optional LoRA requests through the serving system."""
 
+import os
 import argparse
 import json
 import subprocess
@@ -185,14 +186,28 @@ def main(argv=None):
         revisions = {name: rev for name, rev in revisions.items() if name in adapter_models}
 
     local = not args.allow_download
+    tinybert_dir = os.environ.get("SEMCACHE_TINYBERT_DIR")
     encoder = TinyBERTSemanticEncoder(
-        revision=TINYBERT_REVISION, device="cpu", dtype="float32", local_files_only=local,
+        model_id=tinybert_dir or TinyBERTSemanticEncoder.DEFAULT_MODEL_ID,
+        revision=TINYBERT_REVISION,
+        device="cpu",
+        dtype="float32",
+        local_files_only=local or bool(tinybert_dir),
     )
     encoder.encode(["Warmup."])
-    tokenizers = {
-        name: AutoTokenizer.from_pretrained(name, revision=rev, local_files_only=local)
-        for name, rev in revisions.items()
-    }
+    from transformers.utils.hub import cached_file
+
+    tokenizers = {}
+    for name, rev in revisions.items():
+        if local:
+            config_file = cached_file(
+                name, "config.json", revision=rev, local_files_only=True,
+            )
+            tokenizers[name] = AutoTokenizer.from_pretrained(
+                Path(config_file).parent, local_files_only=True,
+            )
+        else:
+            tokenizers[name] = AutoTokenizer.from_pretrained(name, revision=rev)
     models = {
         name: AutoModelForCausalLM.from_pretrained(
             name, revision=rev, local_files_only=local, dtype=torch.bfloat16, attn_implementation="sdpa",

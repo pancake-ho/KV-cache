@@ -43,6 +43,7 @@ args = [
     "--prefix-tokens", str(config.PREFIX_TOKENS),
     "--suffix-tokens", str(config.SUFFIX_TOKENS),
     "--new-tokens", str(config.NEW_TOKENS),
+    "--semcache-root", path(os.environ.get("SEMCACHE_ROOT", "baseline/GP_semcache")), # 실행을 위한 별도 추가
 ]
 if config.MULTI_USER:
     args.append("--multi-user")
