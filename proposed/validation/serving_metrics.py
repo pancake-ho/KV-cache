@@ -6,11 +6,11 @@ from statistics import fmean, median
 from time import perf_counter
 
 
-def measure_replays(run, *, device, repeats):
+def measure_replays(run, *, device, repeats, warmup=None):
     """Warm the mode once, then time fresh traces and sample CUDA allocator peaks."""
     import torch
 
-    run()
+    (run if warmup is None else warmup)()
     samples = []
     for _ in range(repeats):
         torch.cuda.synchronize(device)
