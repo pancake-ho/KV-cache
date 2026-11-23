@@ -78,7 +78,8 @@ E2E_QA_JOB = "223131"
 E2E_QA_REPORT = None  # Specify a path instead of resolving E2E_QA_JOB.
 E2E_PROFILE = "pilot"
 E2E_SEMCACHE_ROOT = Path("/data/surt321/repos/lab/GP_semcache-r5-d38edf8")
-E2E_TINYBERT_DIR = None
+E2E_TINYBERT_DIR = Path("/data/surt321/models/semcache/tinybert-34707a3")
+E2E_HF_HUB_CACHE = Path("/data/surt321/hf_cache/hub")
 E2E_CACHEBRIDGE = {
     "1.7b-4b": E2E_RESULTS / "cachebridge/ridge-matched-512-attn-repair-fit/output/artifact",
 }

@@ -89,6 +89,7 @@ def pilot_check(rows, method):
 def models_and_prompts(settings, qa, old, device):
     import torch
     from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import LocalEntryNotFoundError
     from transformers import AutoTokenizer
 
     from ..src.exp.mapper_optim.inputs import ModelIdentity
@@ -112,8 +113,19 @@ def models_and_prompts(settings, qa, old, device):
         local = qa["local_models"][model_id]
         template_path, template_revision = local["path"], local["revision"]
     else:
-        template_path = str(Path(hf_hub_download(
-            model_id, "config.json", revision=revision, local_files_only=True)).parent)
+        hub_cache = settings.get("hf_hub_cache")
+        try:
+            config_path = hf_hub_download(
+                model_id, "config.json", revision=revision,
+                cache_dir=hub_cache, local_files_only=True,
+            )
+        except LocalEntryNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Frozen QA tokenizer snapshot {model_id}@{revision} is missing in "
+                f"{hub_cache or 'the default Hugging Face cache'}. "
+                "Set E2E_HF_HUB_CACHE to the hub directory containing this snapshot."
+            ) from exc
+        template_path = str(Path(config_path).parent)
         template_revision = Path(template_path).name
     if template_revision != revision:
         raise ValueError("Pinned reference Qwen tokenizer revision differs from the QA template")
@@ -167,10 +179,18 @@ def evaluate(settings, report, output):
         raise RuntimeError("Use the PyTorch and Transformers versions of the completed QA job")
     torch.manual_seed(settings["seed"])
     torch.backends.cuda.matmul.allow_tf32 = False
-    encoder = TinyBERTSemanticEncoder(
-        model_id=settings["tinybert_dir"] or TinyBERTSemanticEncoder.DEFAULT_MODEL_ID,
-        revision=TINYBERT_REVISION, local_files_only=True, device="cpu", dtype="float32",
-    )
+    encoder_model = settings["tinybert_dir"] or TinyBERTSemanticEncoder.DEFAULT_MODEL_ID
+    try:
+        encoder = TinyBERTSemanticEncoder(
+            model_id=encoder_model, revision=TINYBERT_REVISION,
+            local_files_only=True, device="cpu", dtype="float32",
+        )
+    except OSError as exc:
+        raise OSError(
+            f"TinyBERT encoder could not be loaded offline from {encoder_model!r} "
+            f"(revision {TINYBERT_REVISION}): {exc}. "
+            "Check E2E_TINYBERT_DIR for the local encoder files."
+        ) from exc
     encoder.encode(["Warmup."])
 
     runtime, identities, snapshots, prompts = models_and_prompts(settings, qa, old, device)

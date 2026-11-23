@@ -118,6 +118,7 @@ def resolve_settings(config):
     if not (semcache / "src/semcache/edgelora/r5_semantic_index.py").is_file():
         raise FileNotFoundError(f"R5 semantic index missing in {semcache}; set E2E_SEMCACHE_ROOT")
     methods, artifacts, manifests = artifacts_for(pair, result, old, config.E2E_CACHEBRIDGE, profile_name)
+    hub_cache = getattr(config, "E2E_HF_HUB_CACHE", None)
     return {
         "repo": {"path": str(root), "git": git_state(root)},
         "pair": pair, "profile_name": profile_name, "profile": profile,
@@ -128,6 +129,7 @@ def resolve_settings(config):
         "minimum_free_gib": config.E2E_MIN_FREE_GIB[result["models"]["target"]["name"]],
         "semcache_root": str(semcache),
         "tinybert_dir": str(config.E2E_TINYBERT_DIR) if config.E2E_TINYBERT_DIR else None,
+        "hf_hub_cache": str(Path(hub_cache).expanduser().resolve()) if hub_cache else None,
         "seed": config.E2E_SEED, "repair_fraction": config.E2E_REPAIR_FRACTION,
     }
 
