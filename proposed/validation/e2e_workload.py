@@ -34,14 +34,18 @@ def documents(cohort, prompts, count, seed):
     return selected
 
 
+def workload_kinds(count, scenario, seed):
+    same = round(count * scenario["same_share"])
+    cross = min(round(count * scenario["cross_share"]), count - same)
+    kinds = ["same"] * same + ["cross"] * cross + ["cold"] * (count - same - cross)
+    Random(seed).shuffle(kinds)
+    return kinds
+
+
 def make_trace(selected, tokenizer, model_ids, scenario, window, seed):
     count = len(selected)
-    same = round(count * scenario["same_share"])
-    cross = round(count * scenario["cross_share"])
-    cross = min(cross, count - same)
     source, target = model_ids
-    types = ["same"] * same + ["cross"] * cross + ["cold"] * (count - same - cross)
-    Random(seed).shuffle(types)
+    types = workload_kinds(count, scenario, seed)
     steps = []
     for index, ((document, (tokens, boundary)), kind) in enumerate(zip(selected, types, strict=True)):
         tokens = tuple(tokens)
@@ -82,13 +86,13 @@ def distribution(samples):
             "p95": quantiles(samples, n=20, method="inclusive")[-1] if len(samples) > 1 else samples[0]}
 
 
-def summarize(replays):
+def summarize(replays, *, trace=None, cache_capacity_bytes=None):
     consumers = defaultdict(list)
     for replay in replays:
         for row in replay["requests"]:
             if row["kind"] != "producer":
                 consumers[row["request_id"]].append(row)
-    # Each QA document contributes one observation to the latency percentiles.
+    # Each target QA contributes one observation to the latency percentiles.
     metrics = ("ttft_ms", "application_ms", "mapping_ms", "prefill_ms")
     rows = [{
         "request_id": key, "group": values[0]["group"], "kind": values[0]["kind"],
@@ -97,6 +101,7 @@ def summarize(replays):
         "exact_match": mean(row["exact_match"] for row in values),
         "repeat_tokens_match": all(row["generated_ids"] == values[0]["generated_ids"]
                                    for row in values),
+        **({"paper_id": values[0]["paper_id"]} if "paper_id" in values[0] else {}),
         **{name: median(row[name] for row in values) for name in metrics},
     } for key, values in consumers.items()]
     hits = {"native_kv_hit", "cross_model_kv_hit"}
@@ -125,7 +130,55 @@ def summarize(replays):
                "qa_f1": mean(row["f1"] for row in rows if row["kind"] == kind)}
         for kind in kind_counts
     }
+    if trace is not None:
+        summary["reuse"] = summarize_reuse(replays, consumers, trace, cache_capacity_bytes)
     return summary, rows
+
+
+def summarize_reuse(replays, consumers, trace, capacity_bytes):
+    if capacity_bytes is None or capacity_bytes < 1:
+        raise ValueError("Reuse metrics require a positive cache capacity")
+    targets = [event for event in trace if event.kind != "producer"]
+    producers = [event for event in trace if event.kind == "producer"]
+    producer_kind = {event.prefix_request_id: event.kind for event in targets if event.prefix_request_id}
+    opportunities = sum(event.kind == "cross" for event in targets)
+    target_count = len(targets)
+    if not opportunities or target_count != len(consumers):
+        raise ValueError("Invalid target QA or cross-model opportunity count")
+    trace_ids = [event.request.request_id for event in trace]
+    cross_hits, evictions, occupancy, producer_ms = [], [], [], []
+    for replay in replays:
+        requests = replay["requests"]
+        if [row["request_id"] for row in requests] != trace_ids:
+            raise ValueError("Replay requests do not match the repeated-prefix trace")
+        rows = [row for row in requests if row["kind"] != "producer"]
+        cross_hits.append(sum(row["kind"] == "cross" and row["path"] == "cross_model_kv_hit"
+                              for row in rows))
+        evictions.append(sum(row["cache_evictions"] for row in requests))
+        occupancy.append(median(row["resident_kv_bytes_before"] / capacity_bytes for row in rows))
+        producer_ms.append(sum(row["application_ms"] for row in requests if row["kind"] == "producer"))
+
+    hit_ttfts = []
+    for samples in consumers.values():
+        hits = [row for row in samples if row["path"] == "cross_model_kv_hit"]
+        if hits:
+            hit_ttfts.append(median(row["ttft_ms"] for row in hits))
+    return {
+        "context_documents": len({event.document["paper_id"] for event in targets}),
+        "target_qa_per_replay": target_count,
+        "producer_prefills_per_replay": len(producers),
+        "cross_source_prefills_per_replay": sum(kind == "cross" for kind in producer_kind.values()),
+        "producer_application_ms_per_replay_p50": median(producer_ms),
+        "cross_opportunities_per_replay": opportunities,
+        "cross_hits_by_replay": cross_hits,
+        "cross_hit_rate_given_eligible": sum(cross_hits) / (opportunities * len(replays)),
+        "cross_hit_qa_count": len(hit_ttfts),
+        "cross_hit_ttft_ms": distribution(hit_ttfts) if hit_ttfts else None,
+        "elapsed_ms_per_target_qa": distribution(
+            [1000 * replay["wall_seconds"] / target_count for replay in replays]),
+        "cache_evictions_by_replay": evictions,
+        "cache_fill_before_qa_ratio_p50": median(occupancy),
+    }
 
 
 def paired_deltas(rows, full, seed):
@@ -135,13 +188,24 @@ def paired_deltas(rows, full, seed):
     paired = {"f1_points": defaultdict(list), "ttft_ms": defaultdict(list)}
     for row in rows:
         old = reference[row["request_id"]]
-        if (row["group"], row["kind"]) != (old["group"], old["kind"]):
+        paper = row.get("paper_id")
+        if (row["group"], row["kind"], paper) != (old["group"], old["kind"], old.get("paper_id")):
             raise ValueError("Paired workload labels differ")
-        paired["f1_points"][row["group"]].append(100 * (row["f1"] - old["f1"]))
-        paired["ttft_ms"][row["group"]].append(row["ttft_ms"] - old["ttft_ms"])
-    return {name: {"mean": mean(value for group in groups.values() for value in group),
-                   "document_bootstrap_ci95": interval(groups, seed, draws=2000)}
-            for name, groups in paired.items()}
+        key = row["group"], paper
+        paired["f1_points"][key].append(100 * (row["f1"] - old["f1"]))
+        paired["ttft_ms"][key].append(row["ttft_ms"] - old["ttft_ms"])
+    result = {}
+    for name, blocks in paired.items():
+        groups = defaultdict(list)
+        for (group, paper), values in blocks.items():
+            groups[group].extend(values if paper is None else [mean(values)])
+        result[name] = {
+            "mean": mean(value for block in blocks.values() for value in block),
+            "document_bootstrap_ci95": interval(groups, seed, draws=2000),
+        }
+        if any(paper is not None for _, paper in blocks):
+            result[name]["bootstrap_unit"] = "paper"
+    return result
 PUNCTUATION = str.maketrans("", "", string.punctuation)
 
 

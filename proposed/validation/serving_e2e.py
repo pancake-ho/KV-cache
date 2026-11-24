@@ -59,8 +59,14 @@ def run_trace(runtime, method, transfer, make_index, trace, case, budget, codec)
     engine = ServingEngine(runtime, cache=cache, transfer=transfer)
     rows = []
     for event in trace:
+        if "reuse_count" in case:
+            before_bytes = cache.bytes if cache is not None else 0
+            before_evictions = cache.evictions if cache is not None else 0
         row = engine.serve(event.request, 1 if event.kind == "producer" else budget)
         route_check(event, row, method)
+        if "reuse_count" in case:
+            row["resident_kv_bytes_before"] = before_bytes
+            row["cache_evictions"] = cache.evictions - before_evictions if cache is not None else 0
         rows.append(row)
     return rows
 
@@ -71,6 +77,8 @@ def add_quality(rows, trace, tokenizer, eos):
                    document_sha256=event.document["document_sha256"],
                    token_sha256=event.document["token_sha256"],
                    source_prefix_tokens=event.document["source_prefix_tokens"])
+        if "paper_id" in event.document:
+            row.update(paper_id=event.document["paper_id"], question_id=event.document["question_id"])
         if event.kind != "producer":
             ids = row["generated_ids"]
             length = next((i for i, token in enumerate(ids) if token in eos), len(ids))
@@ -130,13 +138,21 @@ def models_and_prompts(settings, qa, old, device):
     if template_revision != revision:
         raise ValueError("Pinned reference Qwen tokenizer revision differs from the QA template")
     template = AutoTokenizer.from_pretrained(template_path, local_files_only=True)
-    prompts = frozen_prompts(old["dataset"], old["cohort"], template, tokenizers)
+    if reuse_dataset := settings.get("reuse_dataset"):
+        from .reuse_experiment.qasper_cohort import load_reuse_cohort
+
+        cohort, prompts = load_reuse_cohort(
+            reuse_dataset, old, settings["profile"], template, tokenizers, settings["seed"],
+        )
+    else:
+        cohort = old["cohort"]
+        prompts = frozen_prompts(old["dataset"], cohort, template, tokenizers)
     keys = [identity.name for identity in identities]
     runtime = QwenRuntime(
         {name: model.load(device, torch.bfloat16) for name, model in zip(keys, models, strict=True)},
         dict(zip(keys, tokenizers, strict=True)), device,
     )
-    return runtime, identities, snapshots, prompts
+    return runtime, identities, snapshots, cohort, prompts
 
 
 def evaluate(settings, report, output):
@@ -193,14 +209,16 @@ def evaluate(settings, report, output):
         ) from exc
     encoder.encode(["Warmup."])
 
-    runtime, identities, snapshots, prompts = models_and_prompts(settings, qa, old, device)
+    runtime, identities, snapshots, cohort, prompts = models_and_prompts(settings, qa, old, device)
     runtime.warmup()
     pair = tuple(item.name for item in identities)
     target = runtime.models[pair[1]]
     end = target.generation_config.eos_token_id
     eos = {end} if end is None or isinstance(end, int) else set(end)
     profile = settings["profile"]
-    selected = documents(old["cohort"], prompts, profile["documents"], settings["seed"])
+    reuse = "reuse_dataset" in settings
+    selected = (list(zip(cohort, prompts, strict=True)) if reuse
+                else documents(cohort, prompts, profile["documents"], settings["seed"]))
     report["cohort"] = [item for item, _ in selected]
     if max(len(ids) for _, (ids, _) in selected) + profile["new_tokens"] > min(x.context for x in identities):
         raise ValueError("Selected profile exceeds model context length")
@@ -208,6 +226,8 @@ def evaluate(settings, report, output):
         "one GPU, both models resident, sequential ServingEngine requests; TTFT and E2E on QA requests; "
         "memory and throughput include producers; fixed decode budget, score before first EOS"
     )
+    if reuse:
+        report["measurement_scope"] += "; elapsed per target QA includes all producer requests"
     report["semantic_encoder"] = encoder.metadata
     base_bytes = torch.cuda.memory_allocated(device)
 
@@ -215,7 +235,13 @@ def evaluate(settings, report, output):
     for case in profile["scenarios"]:
         name = case["id"]
         report["results"][name] = {"scenario": case, "methods": {}}
-        trace = make_trace(selected, runtime.tokenizers[pair[1]], pair, case, profile["window"], settings["seed"])
+        tokenizer = runtime.tokenizers[pair[1]]
+        if reuse:
+            from .reuse_experiment.request_schedule import make_reuse_trace
+
+            trace = make_reuse_trace(selected, tokenizer, pair, case, profile, settings["seed"])
+        else:
+            trace = make_trace(selected, tokenizer, pair, case, profile["window"], settings["seed"])
         warm_ids = set()
         for kind in ("same", "cross", "cold"):
             candidates = [event for event in trace if event.kind == kind]
@@ -259,8 +285,10 @@ def evaluate(settings, report, output):
                         "model_allocated_bytes": base_bytes,
                         "mapper_allocated_bytes": latency["start_gpu_allocated_bytes"] - base_bytes,
                     })
-                summary, per_doc = summarize(replays)
-                if settings["profile_name"] == "pilot":
+                summary, per_doc = summarize(
+                    replays, trace=trace if reuse else None, cache_capacity_bytes=case["cache_mib"] << 20,
+                )
+                if settings["profile_name"] in {"pilot", "reuse_pilot"}:
                     pilot_check(per_doc, method)
                 methods = report["results"][name]["methods"]
                 delta = {} if method == "full" else paired_deltas(

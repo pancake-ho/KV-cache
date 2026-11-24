@@ -2,6 +2,7 @@
 
 import csv
 from pathlib import Path
+from statistics import median
 
 from .e2e_inputs import read
 
@@ -39,7 +40,28 @@ def table(report):
                 "qa_f1": 100 * m["qa_f1"], "qa_em": 100 * m["qa_em"],
                 "delta_f1_vs_full": delta.get("f1_points", {}).get("mean"),
                 "delta_f1_ci95_low": f1_ci[0], "delta_f1_ci95_high": f1_ci[1],
+                **(reuse_columns(case["scenario"], m) if "reuse" in m else {}),
             }
+
+
+def reuse_columns(scenario, summary):
+    metrics = summary["reuse"]
+    hit_ttft = metrics["cross_hit_ttft_ms"]
+    return {
+        "reuse_count": scenario["reuse_count"],
+        "context_documents": metrics["context_documents"],
+        "target_qa": metrics["target_qa_per_replay"],
+        "producer_prefills": metrics["producer_prefills_per_replay"],
+        "cross_source_prefills": metrics["cross_source_prefills_per_replay"],
+        "cross_opportunities": metrics["cross_opportunities_per_replay"],
+        "elapsed_per_target_qa_ms": metrics["elapsed_ms_per_target_qa"]["p50"],
+        "producer_ms_per_replay": metrics["producer_application_ms_per_replay_p50"],
+        "cross_hit_ttft_ms": hit_ttft["p50"] if hit_ttft else None,
+        "mapping_p50_ms": summary["mapping_ms"]["p50"],
+        "eligible_cross_hit_pct": 100 * metrics["cross_hit_rate_given_eligible"],
+        "cache_evictions": median(metrics["cache_evictions_by_replay"]),
+        "cache_fill_before_qa_pct": 100 * metrics["cache_fill_before_qa_ratio_p50"],
+    }
 
 
 def validate_complete(report):
@@ -144,7 +166,9 @@ def render(report_path, out):
     rows = list(table(report))
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    with (out / "metrics.csv").open("w", newline="", encoding="utf-8") as file:
+    reuse_mode = report["settings"]["profile"].get("reuse_experiment")
+    csv_name = "reuse_metrics.csv" if reuse_mode else "metrics.csv"
+    with (out / csv_name).open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
@@ -158,6 +182,10 @@ def render(report_path, out):
         "axes.spines.top": False, "axes.spines.right": False, "axes.linewidth": .7,
         "axes.grid": True, "axes.axisbelow": True, "grid.color": "#e1e5e8", "grid.linewidth": .45,
     })
+    if reuse_mode:
+        plot_reuse(plt, rows, out, reuse_mode)
+        print(f"Figures {out}", flush=True)
+        return
     info = report["settings"]
     scope = f"{info['pair']}   ·   {info['profile']['documents']} QA documents"
     if info["profile_name"] == "pilot":
@@ -170,6 +198,45 @@ def render(report_path, out):
     if {"mixed", "small_cache", "bitpack5"} <= cases:
         cache_tradeoff(plt, rows, out / "cache_tradeoff", scope)
     print(f"Figures {out}", flush=True)
+
+
+def plot_reuse(plt, rows, out, mode):
+    if mode == "amortization":
+        x_key, x_label = "reuse_count", "Target queries per cross-model source prefill"
+    else:
+        x_key, x_label = "cache_budget_mib", "KV cache budget (MiB)"
+    figures = {
+        "reuse_e2e": (
+            ("elapsed_per_target_qa_ms", "Elapsed time per target QA (ms)"),
+            ("ttft_p50_ms", "Median TTFT (ms)"),
+            ("peak_allocated_gib", "Peak GPU allocated (GiB)"),
+            ("qa_f1", "QA F1 (%)"),
+        ),
+        "reuse_cache": (
+            ("eligible_cross_hit_pct", "Eligible cross-model hit rate (%)"),
+            ("peak_resident_kv_gib", "Peak resident KV (GiB)"),
+            ("cache_evictions", "Cache evictions per replay"),
+            ("cache_fill_before_qa_pct", "Median KV budget used (%)"),
+        ),
+    }
+    ticks = sorted({row[x_key] for row in rows})
+    methods = dict.fromkeys(row["method"] for row in rows)
+    for name, metrics in figures.items():
+        fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.45), layout="constrained", sharex=True)
+        for ax, (key, label) in zip(axes.flat, metrics, strict=True):
+            for method in methods:
+                values = sorted((row[x_key], row[key]) for row in rows if row["method"] == method)
+                method_label, color, marker, linestyle = STYLE[method]
+                ax.plot(*zip(*values), label="Proposed" if method == "rarecache" else method_label,
+                        color=color, marker=marker, linestyle=linestyle, linewidth=1.35, markersize=4)
+            ax.set(ylabel=label, xticks=ticks)
+            ax.grid(axis="x", visible=False)
+            if label.endswith("(%)"):
+                ax.set_ylim(-4, 104)
+        for ax in axes[-1]:
+            ax.set_xlabel(x_label)
+        axes[0, 0].legend(loc="lower right", fontsize=7, handlelength=1.5, framealpha=.93)
+        save(plt, fig, out / name)
 
 
 if __name__ == "__main__":

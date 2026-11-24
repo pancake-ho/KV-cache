@@ -47,6 +47,7 @@ class PrefixCache:
         self.codec = codec
         self.entries: OrderedDict[str, Entry] = OrderedDict()
         self.bytes = 0
+        self.evictions = 0
 
     def lookup(self, request: Request, *, adapter_sha256: str | None = None, transfer=None) -> Lookup:
         assignment = self.index.assign(request.text)
@@ -112,6 +113,7 @@ class PrefixCache:
             victim = next(iter(self.entries))
             self.index.invalidate(victim)
             self.bytes -= self.entries.pop(victim).size_bytes
+            self.evictions += 1
         self.index.add(key, {
             "entry_id": key,
             "source_request_id": key,

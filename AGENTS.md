@@ -48,6 +48,15 @@ Do not recommend large refactors unless they are required to fix an actual probl
 
 ---
 
+
+## Code Changes
+
+- Extend the existing implementation first when its responsibilities and caller behavior are compatible.
+- Isolate experiment-specific behavior when combining it with existing code would mix incompatible contracts. Keep shared logic in its existing module.
+- Group experiment-specific modules under a clearly named directory and name each file for its responsibility. Reuse the existing configuration and entry point when they already fit.
+
+---
+
 ## Research Assumptions
 
 Do NOT assume any of the following unless they are explicitly defined by the current branch, config, or experiment:

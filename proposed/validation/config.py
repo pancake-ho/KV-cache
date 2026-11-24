@@ -73,10 +73,10 @@ OUTPUT_ROOT = REPO_ROOT / "results/semcache"
 E2E_DATA_ROOT = Path("/data") / getuser()
 E2E_RESULTS = E2E_DATA_ROOT / "kv_mapper_optim_runs"
 E2E_OUTPUT_ROOT = OUTPUT_ROOT
-E2E_PAIR = "0.6b-8b"
-E2E_QA_JOB = "223131"
+E2E_PAIR = "1.7b-4b"
+E2E_QA_JOB = "222976"
 E2E_QA_REPORT = None  # Specify a path instead of resolving E2E_QA_JOB.
-E2E_PROFILE = "pilot"
+E2E_PROFILE = "raw_sweep"
 E2E_SEMCACHE_ROOT = Path("/data/surt321/repos/lab/GP_semcache-r5-d38edf8")
 E2E_TINYBERT_DIR = Path("/data/surt321/models/semcache/tinybert-34707a3")
 E2E_HF_HUB_CACHE = Path("/data/surt321/hf_cache/hub")
@@ -90,7 +90,31 @@ E2E_MIN_FREE_GIB = {"Qwen/Qwen3-4B": 15, "Qwen/Qwen3-8B": 22}
 E2E_MIXED = {"id": "mixed", "same_share": 0.25, "cross_share": 0.50,
              "cache_mib": 1024, "codec": "raw"}
 E2E_PACKED = {**E2E_MIXED, "id": "bitpack5", "codec": "bitpack5"}
+
+# QASPER test archive from the dataset authors. The run uses local files only.
+E2E_REUSE_DATASET = E2E_RESULTS / "datasets/qasper-test-and-evaluator-v0.3.tgz"
+E2E_REUSE_DATASET_SHA256 = "72a52a41193e2838b8074f80ac074b94f956b84886c36a61c58a7df4171bdd72"
+E2E_REUSE_BASE = {
+    "documents": 12, "repeats": 2, "new_tokens": 64,
+    "questions_per_document": 4, "prefix_tokens": (2048, 3400),
+}
+E2E_REUSE_CASE = {**E2E_MIXED, "reuse_count": E2E_REUSE_BASE["questions_per_document"]}
+E2E_REUSE_AMORTIZATION = {
+    **E2E_REUSE_BASE, "reuse_experiment": "amortization",
+    "scenarios": [{**E2E_REUSE_CASE, "id": f"reuse_{count}", "reuse_count": count}
+                  for count in (1, 2, 4)],
+}
+
 E2E_PROFILES = {
+    "reuse_amortization": E2E_REUSE_AMORTIZATION,
+    "reuse_pilot": {
+        **E2E_REUSE_AMORTIZATION, "documents": 4, "repeats": 1, "new_tokens": 8,
+    },
+    "reuse_pressure": {
+        **E2E_REUSE_BASE, "reuse_experiment": "pressure", "pressure_window": 4,
+        "scenarios": [{**E2E_REUSE_CASE, "id": f"reuse_cache_{mib}", "cache_mib": mib}
+                      for mib in (512, 1024, 2048)],
+    },
     "pilot": {"documents": 8, "repeats": 1, "new_tokens": 8, "window": 1,
               "scenarios": [E2E_MIXED, E2E_PACKED]},
     "sweep": {"documents": 40, "repeats": 2, "new_tokens": 64, "window": 2,
@@ -101,4 +125,11 @@ E2E_PROFILES = {
               ]},
     "legacy": {"documents": 40, "repeats": 2, "new_tokens": 64, "window": 2,
                "scenarios": [E2E_MIXED]},
+}
+E2E_PROFILES["raw_sweep"] = {
+    **E2E_PROFILES["sweep"],
+    "scenarios": [
+        case for case in E2E_PROFILES["sweep"]["scenarios"]
+        if case["codec"] == "raw" and case["cache_mib"] == 1024
+    ],
 }

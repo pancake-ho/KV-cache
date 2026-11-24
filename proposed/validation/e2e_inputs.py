@@ -107,7 +107,18 @@ def resolve_settings(config):
     qa, result, old = qa_inputs(path, pair)
     if sha(path) != input_digest:
         raise ValueError("Completed QA report changed while reading it")
-    if not 3 <= profile["documents"] <= len(old["cohort"]):
+    reuse = None
+    if profile.get("reuse_experiment"):
+        dataset = Path(config.E2E_REUSE_DATASET).expanduser().resolve()
+        if not dataset.is_file():
+            raise FileNotFoundError(f"Place the QASPER test archive at {dataset}")
+        digest = sha(dataset)
+        if digest != config.E2E_REUSE_DATASET_SHA256:
+            raise ValueError(f"QASPER test archive fingerprint differs at {dataset}")
+        reuse = {"path": str(dataset), "sha256": digest, "dataset": "QASPER v0.3 test"}
+        if not profile["scenarios"]:
+            raise ValueError("Reuse profiles require at least one scenario")
+    elif not 3 <= profile["documents"] <= len(old["cohort"]):
         raise ValueError("Profile document count is outside the completed QA cohort")
     if not Path(old["dataset"]).is_file():
         raise FileNotFoundError(old["dataset"])
@@ -120,6 +131,7 @@ def resolve_settings(config):
     methods, artifacts, manifests = artifacts_for(pair, result, old, config.E2E_CACHEBRIDGE, profile_name)
     hub_cache = getattr(config, "E2E_HF_HUB_CACHE", None)
     return {
+        **({"reuse_dataset": reuse} if reuse is not None else {}),
         "repo": {"path": str(root), "git": git_state(root)},
         "pair": pair, "profile_name": profile_name, "profile": profile,
         "qa_report": str(path), "qa_report_sha256": input_digest,
@@ -134,16 +146,7 @@ def resolve_settings(config):
     }
 
 
-def frozen_prompts(archive, cohort, template, tokenizers):
-    """Reconstruct the original Qwen QA template and verify each frozen item."""
-    from ..src.exp.mapper_optim.inputs import token_hash
-
-    marker = "__KV_REUSE_BOUNDARY_4459__"
-    vocab = template.get_vocab()
-    if any(t.get_vocab() != vocab or t.special_tokens_map != template.special_tokens_map for t in tokenizers):
-        raise ValueError("Qwen3 tokenizer vocabularies or specials differ")
-
-    datasets = {item["dataset"] for item in cohort}
+def longbench_rows(archive, datasets):
     rows = {}
     with ZipFile(archive) as bundle:
         for dataset in datasets:
@@ -153,34 +156,57 @@ def frozen_prompts(archive, cohort, template, tokenizers):
             with bundle.open(paths[0]) as stream:
                 rows[dataset] = {i: json.loads(line) for i, line in enumerate(stream, 1) if line.strip()}
 
+    return rows
+
+
+def check_tokenizers(template, tokenizers):
+    vocab = template.get_vocab()
+    if any(t.get_vocab() != vocab or t.special_tokens_map != template.special_tokens_map for t in tokenizers):
+        raise ValueError("Qwen3 tokenizer vocabularies or specials differ")
+
+
+def render_qa_prompt(context, question, template, tokenizers):
+    marker = "__KV_REUSE_BOUNDARY_4459__"
+    if marker in context or marker in question:
+        raise ValueError("Unexpected QA boundary marker in input")
+    content = (
+        "Read the following document and answer the question using the document. "
+        "Provide only the short answer. If the document does not answer the question, "
+        "respond with unanswerable.\n\nDocument:\n"
+        f"{context}{marker}\n\nQuestion: {question}\nAnswer:"
+    )
+    rendered = template.apply_chat_template([{"role": "user", "content": content}], tokenize=False,
+                                            add_generation_prompt=True, enable_thinking=False)
+    prefix, suffix = rendered.split(marker)
+    text = prefix + suffix
+    options = {"add_special_tokens": False, "return_attention_mask": False, "verbose": False}
+    encoding = template(text, return_offsets_mapping=True, **options)
+    ids = encoding["input_ids"]
+    boundary = next((i for i, (_, end) in enumerate(encoding["offset_mapping"])
+                     if end > len(prefix)), len(ids))
+    if not 0 < boundary < len(ids) or any(tokenizer(text, **options)["input_ids"] != ids
+                                           for tokenizer in tokenizers):
+        raise ValueError("QA prompt has an invalid boundary or different token IDs across models")
+    return ids, boundary
+
+
+def frozen_prompts(archive, cohort, template, tokenizers):
+    """Reconstruct the original Qwen QA template and verify each frozen item."""
+    from ..src.exp.mapper_optim.inputs import token_hash
+
+    check_tokenizers(template, tokenizers)
+    rows = longbench_rows(archive, {item["dataset"] for item in cohort})
     prompts = []
     seen = set()
     for item in cohort:
         row = rows[item["dataset"]][item["line"]]
         context, question = row["context"], row["input"].strip()
-        if marker in context or marker in question:
-            raise ValueError("Unexpected QA boundary marker in input")
-        content = (
-            "Read the following document and answer the question using the document. "
-            "Provide only the short answer. If the document does not answer the question, "
-            "respond with unanswerable.\n\nDocument:\n"
-            f"{context}{marker}\n\nQuestion: {question}\nAnswer:"
-        )
-        rendered = template.apply_chat_template([{"role": "user", "content": content}], tokenize=False,
-                                                add_generation_prompt=True, enable_thinking=False)
-        prefix, suffix = rendered.split(marker)
-        text = prefix + suffix
-        options = {"add_special_tokens": False, "return_attention_mask": False, "verbose": False}
-        encoding = template(text, return_offsets_mapping=True, **options)
-        ids = encoding["input_ids"]
-        boundary = next((i for i, (_, end) in enumerate(encoding["offset_mapping"])
-                         if end > len(prefix)), len(ids))
+        ids, boundary = render_qa_prompt(context, question, template, tokenizers)
         actual = (hashlib.sha256(context.strip().encode()).hexdigest(), token_hash(ids),
                   len(ids), boundary, row["answers"])
         expected = tuple(item[name] for name in ("document_sha256", "token_sha256", "prompt_tokens",
                                                 "source_prefix_tokens", "answers"))
-        if (actual != expected or not 0 < boundary < len(ids)
-                or any(tokenizer(text, **options)["input_ids"] != ids for tokenizer in tokenizers)):
+        if actual != expected:
             raise ValueError(f"Frozen QA prompt differs at {item['dataset']}:{item['line']}")
         canonical = " ".join(context.split()).casefold()
         if canonical in seen:
