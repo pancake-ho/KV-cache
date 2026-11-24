@@ -1,10 +1,11 @@
 """Replay a completed LongBench cohort through the existing serving engine."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 import gc
 import os
 from pathlib import Path
+from statistics import median
 import sys
 
 from . import config
@@ -94,7 +95,7 @@ def pilot_check(rows, method):
         raise RuntimeError(f"{method} pilot did not exercise {sorted(absent)}")
 
 
-def models_and_prompts(settings, qa, old, device):
+def models_and_prompts(settings, qa, old, device, *, load_runtime=True):
     import torch
     from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import LocalEntryNotFoundError
@@ -147,6 +148,8 @@ def models_and_prompts(settings, qa, old, device):
     else:
         cohort = old["cohort"]
         prompts = frozen_prompts(old["dataset"], cohort, template, tokenizers)
+    if not load_runtime:
+        return None, identities, snapshots, cohort, prompts
     keys = [identity.name for identity in identities]
     runtime = QwenRuntime(
         {name: model.load(device, torch.bfloat16) for name, model in zip(keys, models, strict=True)},
@@ -195,6 +198,13 @@ def evaluate(settings, report, output):
         raise RuntimeError("Use the PyTorch and Transformers versions of the completed QA job")
     torch.manual_seed(settings["seed"])
     torch.backends.cuda.matmul.allow_tf32 = False
+    lora_stage = settings["profile"].get("lora_stage")
+    if lora_stage == "fit":
+        from .lora_transfer.fit import fit
+
+        _, _, _, cohort, prompts = models_and_prompts(settings, qa, old, device, load_runtime=False)
+        fit(settings, report, output, device, prompts, cohort)
+        return
     encoder_model = settings["tinybert_dir"] or TinyBERTSemanticEncoder.DEFAULT_MODEL_ID
     try:
         encoder = TinyBERTSemanticEncoder(
@@ -211,6 +221,13 @@ def evaluate(settings, report, output):
 
     runtime, identities, snapshots, cohort, prompts = models_and_prompts(settings, qa, old, device)
     runtime.warmup()
+    if lora_stage:
+        from .lora_transfer.replay import (
+            activate_adapters, assign_adapters, transfer_for, verify_routes,
+        )
+
+        activate_adapters(runtime, identities, settings["lora_routes"])
+        runtime.sync()
     pair = tuple(item.name for item in identities)
     target = runtime.models[pair[1]]
     end = target.generation_config.eos_token_id
@@ -226,7 +243,7 @@ def evaluate(settings, report, output):
         "one GPU, both models resident, sequential ServingEngine requests; TTFT and E2E on QA requests; "
         "memory and throughput include producers; fixed decode budget, score before first EOS"
     )
-    if reuse:
+    if reuse or lora_stage:
         report["measurement_scope"] += "; elapsed per target QA includes all producer requests"
     report["semantic_encoder"] = encoder.metadata
     base_bytes = torch.cuda.memory_allocated(device)
@@ -242,6 +259,8 @@ def evaluate(settings, report, output):
             trace = make_reuse_trace(selected, tokenizer, pair, case, profile, settings["seed"])
         else:
             trace = make_trace(selected, tokenizer, pair, case, profile["window"], settings["seed"])
+        if lora_stage:
+            trace = assign_adapters(trace, settings["lora_routes"][name])
         warm_ids = set()
         for kind in ("same", "cross", "cold"):
             candidates = [event for event in trace if event.kind == kind]
@@ -260,11 +279,15 @@ def evaluate(settings, report, output):
         return SemanticIndex(encoder, clusters=1)
 
     for method in settings["methods"]:
-        with load_transfer(method, settings, identities, snapshots, target, device) as (transfer, metadata):
+        context = (nullcontext((None, None)) if lora_stage
+                   else load_transfer(method, settings, identities, snapshots, target, device))
+        with context as (transfer, metadata):
             runtime.sync()
             for case in profile["scenarios"]:
                 name = case["id"]
                 print(f"{name}: {method}", flush=True)
+                if lora_stage:
+                    transfer, metadata = transfer_for(method, settings, name, identities, snapshots, device)
                 trace, warm_trace, codec = traces[name]
 
                 def replay(events, budget):
@@ -290,6 +313,11 @@ def evaluate(settings, report, output):
                 )
                 if settings["profile_name"] in {"pilot", "reuse_pilot"}:
                     pilot_check(per_doc, method)
+                if lora_stage:
+                    verify_routes((row for replay in replays for row in replay["requests"]
+                                   if row["kind"] != "producer"), method)
+                    summary["elapsed_ms_per_target_qa"] = median(
+                        1000 * replay["wall_seconds"] / len(per_doc) for replay in replays)
                 methods = report["results"][name]["methods"]
                 delta = {} if method == "full" else paired_deltas(
                     per_doc, methods["full"]["documents"], settings["seed"],
@@ -297,6 +325,9 @@ def evaluate(settings, report, output):
                 methods[method] = {"summary": summary, "documents": per_doc, "replays": replays,
                                    "mapper": metadata, "paired_vs_full": delta}
                 write(output, report)
+                if lora_stage:
+                    transfer = None
+                    torch.cuda.empty_cache()
         del transfer
         gc.collect()
         torch.cuda.empty_cache()
@@ -329,6 +360,9 @@ def main():
         raise
     report["status"] = "complete"
     write(output, report)
+    if settings["profile"].get("lora_stage") == "fit":
+        print(f"Report {output}", flush=True)
+        return
     try:
         from .e2e_figures import render
 

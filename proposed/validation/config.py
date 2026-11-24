@@ -76,7 +76,7 @@ E2E_OUTPUT_ROOT = OUTPUT_ROOT
 E2E_PAIR = "1.7b-4b"
 E2E_QA_JOB = "222976"
 E2E_QA_REPORT = None  # Specify a path instead of resolving E2E_QA_JOB.
-E2E_PROFILE = "raw_sweep"
+E2E_PROFILE = "lora_transfer_fit"
 E2E_SEMCACHE_ROOT = Path("/data/surt321/repos/lab/GP_semcache-r5-d38edf8")
 E2E_TINYBERT_DIR = Path("/data/surt321/models/semcache/tinybert-34707a3")
 E2E_HF_HUB_CACHE = Path("/data/surt321/hf_cache/hub")
@@ -86,10 +86,19 @@ E2E_CACHEBRIDGE = {
 E2E_REPAIR_FRACTION = 0.30
 E2E_SEED = 2026
 E2E_MIN_FREE_GIB = {"Qwen/Qwen3-4B": 15, "Qwen/Qwen3-8B": 22}
+E2E_LORA_SOURCE_ADAPTER = "medqa_17b"
+E2E_LORA_TARGET_ADAPTERS = ("medqa", "medmcqa", "fpb")
+E2E_LORA_FIT_JOB = None  # Set to the finished LoRA calibration job ID for evaluation.
 
 E2E_MIXED = {"id": "mixed", "same_share": 0.25, "cross_share": 0.50,
              "cache_mib": 1024, "codec": "raw"}
 E2E_PACKED = {**E2E_MIXED, "id": "bitpack5", "codec": "bitpack5"}
+E2E_LORA_BASE = {
+    "documents": 40, "repeats": 2, "new_tokens": 64, "window": 1,
+    "scenarios": [{**E2E_MIXED, "same_share": 0, "cross_share": 1}],
+}
+E2E_LORA_SOURCE_ADAPTER = "medqa_17b"
+E2E_LORA_TARGET_ADAPTERS = ("medqa", "medmcqa", "fpb")
 
 # QASPER test archive from the dataset authors. The run uses local files only.
 E2E_REUSE_DATASET = E2E_RESULTS / "datasets/qasper-test-and-evaluator-v0.3.tgz"
@@ -133,3 +142,9 @@ E2E_PROFILES["raw_sweep"] = {
         if case["codec"] == "raw" and case["cache_mib"] == 1024
     ],
 }
+E2E_PROFILES.update({
+    "lora_transfer_fit": {**E2E_LORA_BASE, "lora_stage": "fit"},
+    "lora_transfer_pilot": {**E2E_LORA_BASE, "lora_stage": "evaluate",
+                            "documents": 8, "repeats": 1, "new_tokens": 8},
+    "lora_transfer_eval": {**E2E_LORA_BASE, "lora_stage": "evaluate"},
+})

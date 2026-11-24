@@ -1,6 +1,7 @@
 """Paired calibration trace collection and paper-specific affine fitting."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 import gc
 import json
 from pathlib import Path
@@ -30,7 +31,7 @@ class Trace:
 @torch.inference_mode()
 def collect(identity: ModelIdentity, examples: list[dict], root: Path, *,
             role: str, stride: int, device: torch.device, dtype: torch.dtype,
-            capture_factory=None) -> Trace:
+            capture_factory=None, model_context=None) -> Trace:
     length = len(examples[0]["ids"])
     positions = torch.arange(0, length, stride, device=device)
     count = len(examples) * len(positions)
@@ -45,24 +46,26 @@ def collect(identity: ModelIdentity, examples: list[dict], root: Path, *,
               for layer in range(identity.layers)]
     weights = []
     model = identity.load(device, dtype)
-    capture = capture_factory(model) if capture_factory else None
-    if capture is not None:
-        weights = [np.lib.format.open_memmap(root / f"attention_{layer:03d}.npy", mode="w+",
-                                            dtype="float32", shape=(2, count, identity.heads))
-                   for layer in range(identity.layers)]
+    capture = active = None
     try:
-        for index, example in enumerate(examples):
-            ids = torch.tensor([example["ids"]], dtype=torch.long, device=device)
-            cache = prefill(model, ids)
-            start = index * len(positions)
-            rows = slice(start, start + len(positions))
-            for layer, (key, value) in enumerate(unrotate_rows(model, cache)):
-                for writer, data in zip(writes[layer], (key, value), strict=True):
-                    writer[rows] = data.index_select(0, positions).float().cpu().numpy()
+        with (model_context(model) if model_context else nullcontext(model)) as active:
+            capture = capture_factory(active) if capture_factory else None
             if capture is not None:
-                for layer, scores in enumerate(capture.weights(legacy_cache(cache), positions)):
-                    weights[layer][:, rows, :] = scores
-            del cache
+                weights = [np.lib.format.open_memmap(root / f"attention_{layer:03d}.npy", mode="w+",
+                                                    dtype="float32", shape=(2, count, identity.heads))
+                           for layer in range(identity.layers)]
+            for index, example in enumerate(examples):
+                ids = torch.tensor([example["ids"]], dtype=torch.long, device=device)
+                cache = prefill(active, ids)
+                start = index * len(positions)
+                rows = slice(start, start + len(positions))
+                for layer, (key, value) in enumerate(unrotate_rows(active, cache)):
+                    for writer, data in zip(writes[layer], (key, value), strict=True):
+                        writer[rows] = data.index_select(0, positions).float().cpu().numpy()
+                if capture is not None:
+                    for layer, scores in enumerate(capture.weights(legacy_cache(cache), positions)):
+                        weights[layer][:, rows, :] = scores
+                del cache
     finally:
         if capture is not None:
             capture.close()
@@ -71,7 +74,7 @@ def collect(identity: ModelIdentity, examples: list[dict], root: Path, *,
                 writer.flush()
         for writer in weights:
             writer.flush()
-        del capture, model
+        del capture, active, model
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()

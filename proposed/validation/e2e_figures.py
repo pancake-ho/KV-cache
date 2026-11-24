@@ -15,6 +15,8 @@ STYLE = {
     "cachebridge": ("CacheBridge (adapted)", "#7854a3", "D", ":"),
     "rarecache": ("RaReCache", "#1966b2", "o", "-"),
     "mlp": ("MLP (streamed)", "#395a3f", "v", "--"),
+    "lora_base": ("Base mapper on LoRA KV", "#9b6535", "^", ":"),
+    "lora_fitted": ("LoRA-pair mapper", "#1966b2", "o", "-"),
 }
 
 
@@ -41,6 +43,9 @@ def table(report):
                 "delta_f1_vs_full": delta.get("f1_points", {}).get("mean"),
                 "delta_f1_ci95_low": f1_ci[0], "delta_f1_ci95_high": f1_ci[1],
                 **(reuse_columns(case["scenario"], m) if "reuse" in m else {}),
+                **({"elapsed_ms_per_target_qa": m["elapsed_ms_per_target_qa"],
+                    "mapping_p50_ms": m["mapping_ms"]["p50"]}
+                   if "elapsed_ms_per_target_qa" in m else {}),
             }
 
 
@@ -187,6 +192,10 @@ def render(report_path, out):
         print(f"Figures {out}", flush=True)
         return
     info = report["settings"]
+    if info["profile"].get("lora_stage") == "evaluate":
+        plot_lora_routes(plt, rows, info["lora_routes"], out / "lora_transfer_comparison")
+        print(f"Figures {out}", flush=True)
+        return
     scope = f"{info['pair']}   ·   {info['profile']['documents']} QA documents"
     if info["profile_name"] == "pilot":
         scope += "   ·   pilot"
@@ -198,6 +207,33 @@ def render(report_path, out):
     if {"mixed", "small_cache", "bitpack5"} <= cases:
         cache_tradeoff(plt, rows, out / "cache_tradeoff", scope)
     print(f"Figures {out}", flush=True)
+
+
+def plot_lora_routes(plt, rows, routes, path):
+    fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.45), layout="constrained", sharex=True)
+    panels = (
+        ("ttft_p50_ms", "Median TTFT (ms)"),
+        ("elapsed_ms_per_target_qa", "Total time per target QA (ms)"),
+        ("peak_allocated_gib", "Peak GPU allocated (GiB)"),
+        ("qa_f1", "QA F1 (%)"),
+    )
+    methods = list(dict.fromkeys(row["method"] for row in rows))
+    values = {(row["scenario"], row["method"]): row for row in rows}
+    positions = range(len(routes))
+    for ax, (key, label) in zip(axes.flat, panels, strict=True):
+        for i, method in enumerate(methods):
+            name, color, marker, _ = STYLE[method]
+            offset = .13 * (i - (len(methods) - 1) / 2)
+            ax.scatter([x + offset for x in positions], [values[route, method][key] for route in routes],
+                       color=color, marker=marker, label=name, s=24)
+        ax.set_ylabel(label)
+        ax.grid(axis="x", visible=False)
+        ax.set_ylim(bottom=0)
+    for ax in axes[-1]:
+        ax.set_xticks(list(positions), [route["target"]["dataset"] for route in routes.values()])
+        ax.set_xlabel("Target LoRA training dataset")
+    axes[0, 0].legend(loc="lower right", fontsize=7, framealpha=.93)
+    save(plt, fig, path)
 
 
 def plot_reuse(plt, rows, out, mode):

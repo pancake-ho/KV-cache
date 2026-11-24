@@ -128,9 +128,16 @@ def resolve_settings(config):
     semcache = config.E2E_SEMCACHE_ROOT.resolve()
     if not (semcache / "src/semcache/edgelora/r5_semantic_index.py").is_file():
         raise FileNotFoundError(f"R5 semantic index missing in {semcache}; set E2E_SEMCACHE_ROOT")
-    methods, artifacts, manifests = artifacts_for(pair, result, old, config.E2E_CACHEBRIDGE, profile_name)
+    if profile.get("lora_stage"):
+        base = result["fit"]["artifact"]
+        manifest = artifact_manifest("rarecache", base)
+        if manifest != result["fit"]["manifest"]:
+            raise ValueError("Base RaReCache artifact differs from the completed QA run")
+        methods, artifacts, manifests = [], {"rarecache": base}, {"rarecache": manifest}
+    else:
+        methods, artifacts, manifests = artifacts_for(pair, result, old, config.E2E_CACHEBRIDGE, profile_name)
     hub_cache = getattr(config, "E2E_HF_HUB_CACHE", None)
-    return {
+    settings = {
         **({"reuse_dataset": reuse} if reuse is not None else {}),
         "repo": {"path": str(root), "git": git_state(root)},
         "pair": pair, "profile_name": profile_name, "profile": profile,
@@ -144,6 +151,11 @@ def resolve_settings(config):
         "hf_hub_cache": str(Path(hub_cache).expanduser().resolve()) if hub_cache else None,
         "seed": config.E2E_SEED, "repair_fraction": config.E2E_REPAIR_FRACTION,
     }
+    if profile.get("lora_stage"):
+        from .lora_transfer.settings import resolve_lora
+
+        return resolve_lora(config, settings)
+    return settings
 
 
 def longbench_rows(archive, datasets):
