@@ -36,6 +36,23 @@ class Lookup:
     candidate_lookup_ms: float
 
 
+def route_rejection(entry, request, adapter_sha256, transfer):
+    original = entry.request
+    if original.share_group != request.share_group:
+        return "different_share_group"
+    cross_model = original.model_id != request.model_id
+    supports = getattr(transfer, "supports_adapter_route", None)
+    if (cross_model and supports is not None
+            and supports(original, request, source_sha256=entry.adapter_sha256,
+                         target_sha256=adapter_sha256)):
+        return None
+    if original.adapter_id != request.adapter_id or entry.adapter_sha256 != adapter_sha256:
+        return "adapter_mismatch"
+    if cross_model and (transfer is None or not transfer.supports(original, request)):
+        return "unsupported_model_pair"
+    return None
+
+
 class PrefixCache:
     """One process, exact zero-based prefixes and byte-bounded LRU."""
 
@@ -47,6 +64,7 @@ class PrefixCache:
         self.codec = codec
         self.entries: OrderedDict[str, Entry] = OrderedDict()
         self.bytes = 0
+        self.evictions = 0
 
     def lookup(self, request: Request, *, adapter_sha256: str | None = None, transfer=None) -> Lookup:
         assignment = self.index.assign(request.text)
@@ -60,21 +78,14 @@ class PrefixCache:
             if entry is None:
                 raise RuntimeError("semantic index refers to an unowned cache entry")
             original = entry.request
-            if original.share_group != request.share_group:
-                reason = "different_share_group"
-            elif (original.adapter_id != request.adapter_id
-                  or entry.adapter_sha256 != adapter_sha256):
-                reason = "adapter_mismatch"
-            elif (original.model_id != request.model_id
-                  and (transfer is None or not transfer.supports(original, request))):
-                reason = "unsupported_model_pair"
-            elif (len(original.token_ids) >= len(request.token_ids)
-                  or original.token_ids != request.token_ids[:len(original.token_ids)]):
+            reason = route_rejection(entry, request, adapter_sha256, transfer)
+            if reason is None:
+                if (len(original.token_ids) < len(request.token_ids)
+                        and original.token_ids == request.token_ids[:len(original.token_ids)]):
+                    self.entries.move_to_end(key)
+                    hit = entry
+                    break
                 reason = "exact_prefix_mismatch"
-            else:
-                self.entries.move_to_end(key)
-                hit = entry
-                break
             rejected[reason] = rejected.get(reason, 0) + 1
         return Lookup(hit, assignment["cluster_id"], len(candidates), rejected,
                       assignment["semantic_encoding_ms"], assignment["cluster_assignment_ms"],
@@ -112,6 +123,7 @@ class PrefixCache:
             victim = next(iter(self.entries))
             self.index.invalidate(victim)
             self.bytes -= self.entries.pop(victim).size_bytes
+            self.evictions += 1
         self.index.add(key, {
             "entry_id": key,
             "source_request_id": key,

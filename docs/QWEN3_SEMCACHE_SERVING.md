@@ -156,3 +156,39 @@ controlled encoder, an identity mapper fixture, and two PEFT safetensors
 checkpoints. When CUDA is available, they also compare the Triton codec
 against the reference quantizer. Use the Slurm job to verify fitted mappers
 and trained LoRA checkpoints on the GPU.
+
+## Integrated LongBench serving E2E
+
+On `exp/mapper-optim`, set the completed QA job or report, directed model pair,
+and profile in `proposed/validation/config.py`. The job reads the existing
+archive, frozen cohort and mapper checkpoints from the selected QA report.
+
+Submit from the repository root. Create `logs/` once before the first submit.
+
+```bash
+mkdir -p logs
+sbatch run/seraph/qwen3_serving_e2e.sh
+```
+
+The job records the config when it starts. After the pilot finishes, set
+`E2E_PROFILE = "sweep"` and submit the same command. The pilot checks raw and
+5-bit routes. The sweep uses 40 documents and two measured replays per mode.
+The `legacy` profile adds the streamed MLP comparison for 1.7B→4B.
+
+The allocation parameters are Slurm directives in `qwen3_serving_e2e.sh`.
+The exclusion list follows the compatible pool used by the completed QA
+Job 222976. Slurm chooses an eligible node, and the evaluator checks native
+BF16 and free VRAM before model loading. The existing LoRA smoke has its own
+`sbatch run/seraph/qwen3_serving.sh` entry.
+
+The job writes `report-top-system-e2e.json` and `settings.json` under
+`E2E_OUTPUT_ROOT/e2e_<job_id>/`. It generates PDFs, PNGs and a CSV in
+`figures/` using Matplotlib 3.8 or newer. The same trace compares Full
+prefill, exact same-model reuse and the available fitted mappers. Ridge
+uses the existing `LinearKVMapper` with GPU-resident weights. CacheBridge
+uses the adapted attention-weighted head-local artifact.
+
+The scope is the existing sequential single-GPU engine. TTFT, request
+latency, F1 and EM are measured on target questions. Throughput and peak
+memory cover the whole trace, including prefix producers. The report
+distinguishes actual cache hits, resident KV bytes and allocator peaks.

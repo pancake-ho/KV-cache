@@ -13,3 +13,6 @@ proposed/runs/
 baseline/crosskv/work/
 baseline/crosskv/jobs/logs/
 run/**/logs/
+
+# config.py 수정하는 경우가 많기에 ignore에 추가
+proposed/validation/config.py

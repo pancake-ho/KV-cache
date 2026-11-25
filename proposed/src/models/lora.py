@@ -6,6 +6,17 @@ from pathlib import Path
 from threading import RLock
 
 
+def adapter_fingerprint(directory):
+    digest = sha256()
+    directory = Path(directory)
+    for name in ("adapter_config.json", "adapter_model.safetensors"):
+        digest.update(name.encode())
+        with (directory / name).open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    return digest.hexdigest()
+
+
 class LoRARegistry:
     def __init__(self, models):
         self.models = models
@@ -35,22 +46,17 @@ class LoRARegistry:
             base_revision = getattr(base.config, "_commit_hash", None)
             if config.revision is not None and config.revision != base_revision:
                 raise ValueError(f"LoRA base revision mismatch for {directory}")
-            digest = sha256()
-            for path in (config_file, weights_file):
-                digest.update(path.name.encode())
-                with path.open("rb") as stream:
-                    for block in iter(lambda: stream.read(1024 * 1024), b""):
-                        digest.update(block)
+            fingerprint = adapter_fingerprint(directory)
             kwargs = dict(adapter_name=adapter_id, is_trainable=False, local_files_only=True)
             if model_id in self._peft:
                 self._peft[model_id].load_adapter(directory, **kwargs)
             else:
                 self._peft[model_id] = PeftModel.from_pretrained(base, directory, **kwargs)
             self._peft[model_id].eval()
-            self._fingerprints[key] = digest.hexdigest()
+            self._fingerprints[key] = fingerprint
             return {
                 "model_id": model_id, "adapter_id": adapter_id, "path": str(directory),
-                "adapter_sha256": digest.hexdigest(), "adapter_base_revision": config.revision,
+                "adapter_sha256": fingerprint, "adapter_base_revision": config.revision,
             }
 
     @contextmanager
