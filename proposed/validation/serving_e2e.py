@@ -27,7 +27,7 @@ def load_transfer(method, settings, identities, snapshots, target, device):
         yield None, None
         return
     artifact = Path(settings["artifacts"][method])
-    if method in {"rarecache", "cachebridge"}:
+    if method in {"rarecache", "cachebridge", "cachebridge_v2"}:
         from ..src.kv_transfer.affine import AffineKVMapper
 
         mapper = AffineKVMapper(artifact, method, identities, snapshots, device,
@@ -205,6 +205,12 @@ def evaluate(settings, report, output):
         _, _, _, cohort, prompts = models_and_prompts(settings, qa, old, device, load_runtime=False)
         fit(settings, report, output, device, prompts, cohort)
         return
+    cachebridge_initializers = None
+    if "lora_cachebridge_v2" in settings["methods"]:
+        from .lora_transfer.cachebridge_v2 import fit_initializers
+
+        _, _, _, cohort, prompts = models_and_prompts(settings, qa, old, device, load_runtime=False)
+        cachebridge_initializers = fit_initializers(settings, report, output, device, prompts, cohort)
     encoder_model = settings["tinybert_dir"] or TinyBERTSemanticEncoder.DEFAULT_MODEL_ID
     try:
         encoder = TinyBERTSemanticEncoder(
@@ -228,6 +234,10 @@ def evaluate(settings, report, output):
 
         activate_adapters(runtime, identities, settings["lora_routes"])
         runtime.sync()
+    if cachebridge_initializers is not None:
+        from .lora_transfer.cachebridge_v2 import calibrate_readouts
+
+        calibrate_readouts(settings, report, output, old, runtime, device, cachebridge_initializers)
     pair = tuple(item.name for item in identities)
     target = runtime.models[pair[1]]
     end = target.generation_config.eos_token_id
@@ -287,7 +297,10 @@ def evaluate(settings, report, output):
                 name = case["id"]
                 print(f"{name}: {method}", flush=True)
                 if lora_stage:
-                    transfer, metadata = transfer_for(method, settings, name, identities, snapshots, device)
+                    transfer, metadata = transfer_for(
+                        method, settings, name, identities, snapshots, device,
+                        cachebridge_fit=report.get("cachebridge_v2_lora_fits", {}).get(name),
+                    )
                 trace, warm_trace, codec = traces[name]
 
                 def replay(events, budget):
@@ -351,16 +364,21 @@ def main():
         report["settings"] = settings
         write(directory / "settings.json", settings)
         write(output, report)
-        print(f"Pair {settings['pair']} | Profile {settings['profile_name']} | "
-              f"Methods {', '.join(settings['methods'])}", flush=True)
-        evaluate(settings, report, output)
+        print(f"Pair {settings['pair']} | Profile {settings['profile_name']}", flush=True)
+        if settings["profile"].get("fit_only"):
+            from .cachebridge_v2_fit import fit
+
+            fit(settings, report, directory)
+        else:
+            print(f"Methods {', '.join(settings['methods'])}", flush=True)
+            evaluate(settings, report, output)
     except Exception as error:
         report.update(status="failed", error=f"{type(error).__name__}: {error}")
         write(output, report)
         raise
     report["status"] = "complete"
     write(output, report)
-    if settings["profile"].get("lora_stage") == "fit":
+    if settings["profile"].get("fit_only") or settings["profile"].get("lora_stage") == "fit":
         print(f"Report {output}", flush=True)
         return
     try:

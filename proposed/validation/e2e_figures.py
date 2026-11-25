@@ -2,7 +2,7 @@
 
 import csv
 from pathlib import Path
-from statistics import median
+from statistics import mean, median
 
 from .e2e_inputs import read
 
@@ -13,14 +13,17 @@ STYLE = {
     "exact": ("Same-model reuse", "#107f91", "s", "--"),
     "ridge": ("Ridge", "#c66026", "^", "-."),
     "cachebridge": ("CacheBridge (adapted)", "#7854a3", "D", ":"),
+    "cachebridge_v2": ("CacheBridge v2 mapper", "#b12c56", "P", "--"),
     "rarecache": ("RaReCache", "#1966b2", "o", "-"),
     "mlp": ("MLP (streamed)", "#395a3f", "v", "--"),
     "lora_base": ("Base mapper on LoRA KV", "#9b6535", "^", ":"),
-    "lora_fitted": ("LoRA-pair mapper", "#1966b2", "o", "-"),
+    "lora_fitted": ("Proposed (LoRA-pair)", "#1966b2", "o", "-"),
+    "lora_cachebridge_v2": ("CacheBridge v2 (LoRA-pair)", "#b12c56", "P", "--"),
 }
 
 
 def table(report):
+    lora_comparison = bool(report["settings"]["profile"].get("lora_cachebridge_v2_history"))
     for key, case in report["results"].items():
         for method, result in case["methods"].items():
             m = result["summary"]
@@ -46,6 +49,10 @@ def table(report):
                 **({"elapsed_ms_per_target_qa": m["elapsed_ms_per_target_qa"],
                     "mapping_p50_ms": m["mapping_ms"]["p50"]}
                    if "elapsed_ms_per_target_qa" in m else {}),
+                **({"ttft_mean_ms": mean(
+                    row["ttft_ms"] for replay in result["replays"] for row in replay["requests"]
+                    if row["kind"] != "producer")}
+                   if lora_comparison else {}),
             }
 
 
@@ -193,7 +200,19 @@ def render(report_path, out):
         return
     info = report["settings"]
     if info["profile"].get("lora_stage") == "evaluate":
-        plot_lora_routes(plt, rows, info["lora_routes"], out / "lora_transfer_comparison")
+        compare_v2 = bool(info["profile"].get("lora_cachebridge_v2_history"))
+        name = "lora_cachebridge_v2_comparison" if compare_v2 else "lora_transfer_comparison"
+        plot_lora_routes(plt, rows, info["lora_routes"], out / name, mean_ttft=compare_v2)
+        print(f"Figures {out}", flush=True)
+        return
+    if info["profile"].get("compare_cachebridge_v2"):
+        plot_sweep_panels(plt, rows, out / "cachebridge_v2_comparison", "offered_cross_pct",
+                          "Eligible cross-model QA requests (%)", (
+                              ("ttft_p50_ms", "Median TTFT (ms)"),
+                              ("e2e_p50_ms", "Median E2E latency (ms)"),
+                              ("peak_allocated_gib", "Peak GPU allocated (GiB)"),
+                              ("qa_f1", "QA F1 (%)"),
+                          ))
         print(f"Figures {out}", flush=True)
         return
     scope = f"{info['pair']}   ·   {info['profile']['documents']} QA documents"
@@ -209,10 +228,10 @@ def render(report_path, out):
     print(f"Figures {out}", flush=True)
 
 
-def plot_lora_routes(plt, rows, routes, path):
+def plot_lora_routes(plt, rows, routes, path, *, mean_ttft=False):
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.45), layout="constrained", sharex=True)
     panels = (
-        ("ttft_p50_ms", "Median TTFT (ms)"),
+        ("ttft_mean_ms", "Mean TTFT (ms)") if mean_ttft else ("ttft_p50_ms", "Median TTFT (ms)"),
         ("elapsed_ms_per_target_qa", "Total time per target QA (ms)"),
         ("peak_allocated_gib", "Peak GPU allocated (GiB)"),
         ("qa_f1", "QA F1 (%)"),
@@ -255,24 +274,30 @@ def plot_reuse(plt, rows, out, mode):
             ("cache_fill_before_qa_pct", "Median KV budget used (%)"),
         ),
     }
+    for name, metrics in figures.items():
+        plot_sweep_panels(plt, rows, out / name, x_key, x_label, metrics)
+
+
+def plot_sweep_panels(plt, rows, path, x_key, x_label, metrics):
     ticks = sorted({row[x_key] for row in rows})
     methods = dict.fromkeys(row["method"] for row in rows)
-    for name, metrics in figures.items():
-        fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.45), layout="constrained", sharex=True)
-        for ax, (key, label) in zip(axes.flat, metrics, strict=True):
-            for method in methods:
-                values = sorted((row[x_key], row[key]) for row in rows if row["method"] == method)
-                method_label, color, marker, linestyle = STYLE[method]
-                ax.plot(*zip(*values), label="Proposed" if method == "rarecache" else method_label,
-                        color=color, marker=marker, linestyle=linestyle, linewidth=1.35, markersize=4)
-            ax.set(ylabel=label, xticks=ticks)
-            ax.grid(axis="x", visible=False)
-            if label.endswith("(%)"):
-                ax.set_ylim(-4, 104)
-        for ax in axes[-1]:
-            ax.set_xlabel(x_label)
-        axes[0, 0].legend(loc="lower right", fontsize=7, handlelength=1.5, framealpha=.93)
-        save(plt, fig, out / name)
+    fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.45), layout="constrained", sharex=True)
+    for ax, (key, label) in zip(axes.flat, metrics, strict=True):
+        for method in methods:
+            values = sorted((row[x_key], row[key]) for row in rows if row["method"] == method)
+            method_label, color, marker, linestyle = STYLE[method]
+            if method == "cachebridge" and "cachebridge_v2" in methods:
+                method_label = "CacheBridge v1 mapper"
+            ax.plot(*zip(*values), label="Proposed" if method == "rarecache" else method_label,
+                    color=color, marker=marker, linestyle=linestyle, linewidth=1.35, markersize=4)
+        ax.set(ylabel=label, xticks=ticks)
+        ax.grid(axis="x", visible=False)
+        if label.endswith("(%)"):
+            ax.set_ylim(-4, 104)
+    for ax in axes[-1]:
+        ax.set_xlabel(x_label)
+    axes[0, 0].legend(loc="lower right", fontsize=7, handlelength=1.5, framealpha=.93)
+    save(plt, fig, path)
 
 
 if __name__ == "__main__":

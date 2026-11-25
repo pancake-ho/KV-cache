@@ -76,19 +76,19 @@ E2E_OUTPUT_ROOT = OUTPUT_ROOT
 E2E_PAIR = "1.7b-4b"
 E2E_QA_JOB = "222976"
 E2E_QA_REPORT = None  # Specify a path instead of resolving E2E_QA_JOB.
-E2E_PROFILE = "lora_transfer_fit"
+E2E_PROFILE = "lora_cachebridge_v2_compare"
 E2E_SEMCACHE_ROOT = Path("/data/surt321/repos/lab/GP_semcache-r5-d38edf8")
 E2E_TINYBERT_DIR = Path("/data/surt321/models/semcache/tinybert-34707a3")
 E2E_HF_HUB_CACHE = Path("/data/surt321/hf_cache/hub")
 E2E_CACHEBRIDGE = {
     "1.7b-4b": E2E_RESULTS / "cachebridge/ridge-matched-512-attn-repair-fit/output/artifact",
 }
-E2E_REPAIR_FRACTION = 0.30
+E2E_REPAIR_FRACTION = 0.50
 E2E_SEED = 2026
 E2E_MIN_FREE_GIB = {"Qwen/Qwen3-4B": 15, "Qwen/Qwen3-8B": 22}
 E2E_LORA_SOURCE_ADAPTER = "medqa_17b"
 E2E_LORA_TARGET_ADAPTERS = ("medqa", "medmcqa", "fpb")
-E2E_LORA_FIT_JOB = None  # Set to the finished LoRA calibration job ID for evaluation.
+E2E_LORA_FIT_JOB = "223719"  # Set to the finished LoRA calibration job ID for evaluation.
 
 E2E_MIXED = {"id": "mixed", "same_share": 0.25, "cross_share": 0.50,
              "cache_mib": 1024, "codec": "raw"}
@@ -115,6 +115,7 @@ E2E_REUSE_AMORTIZATION = {
 }
 
 E2E_PROFILES = {
+    "cachebridge_v2_fit": {"fit_only": True},
     "reuse_amortization": E2E_REUSE_AMORTIZATION,
     "reuse_pilot": {
         **E2E_REUSE_AMORTIZATION, "documents": 4, "repeats": 1, "new_tokens": 8,
@@ -142,9 +143,22 @@ E2E_PROFILES["raw_sweep"] = {
         if case["codec"] == "raw" and case["cache_mib"] == 1024
     ],
 }
+E2E_CACHEBRIDGE_V2_INITIALIZERS = {
+    "1.7b-4b": E2E_RESULTS / "cachebridge/ridge-matched-512-head-local-fit/output/artifact",
+}
+E2E_CACHEBRIDGE_V2_MAX_HISTORY = 2048
+E2E_CACHEBRIDGE_V2_FIT_JOB = None  # Set to the completed fitting job ID for comparison.
+
+E2E_PROFILES["cachebridge_v2_compare"] = {
+    **E2E_PROFILES["raw_sweep"], "compare_cachebridge_v2": True,
+}
 E2E_PROFILES.update({
     "lora_transfer_fit": {**E2E_LORA_BASE, "lora_stage": "fit"},
     "lora_transfer_pilot": {**E2E_LORA_BASE, "lora_stage": "evaluate",
                             "documents": 8, "repeats": 1, "new_tokens": 8},
     "lora_transfer_eval": {**E2E_LORA_BASE, "lora_stage": "evaluate"},
+    "lora_cachebridge_v2_compare": {
+        **E2E_LORA_BASE, "lora_stage": "evaluate",
+        "lora_cachebridge_v2_history": E2E_CACHEBRIDGE_V2_MAX_HISTORY,
+    },
 })

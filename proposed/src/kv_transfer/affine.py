@@ -17,7 +17,7 @@ class AffineKVMapper:
     """Bind a fitted artifact to the local revisions and wrap request-local replay."""
 
     def __init__(self, artifact, method, identities, snapshots, device, *, repair_fraction=0.30):
-        if method not in {"rarecache", "cachebridge"}:
+        if method not in {"rarecache", "cachebridge", "cachebridge_v2"}:
             raise ValueError(f"Unknown affine mapper {method}")
         mapper = AffineMapper(Path(artifact), method, device,
                               disagreement if method == "rarecache" else None)
@@ -29,6 +29,8 @@ class AffineKVMapper:
             raise ValueError("Serving requires a BF16 KV fitting artifact")
         if method == "cachebridge" and mapper.spec["variant"] != "attn-repair":
             raise ValueError("Expected the verified attention-weighted CacheBridge artifact")
+        if method == "cachebridge_v2" and mapper.spec["variant"] != "layer-ordered-readout":
+            raise ValueError("Expected the layer-ordered CacheBridge v2 artifact")
         if not 0 < repair_fraction <= 1:
             raise ValueError("repair_fraction must be in (0, 1]")
         self.pair = tuple(identity.name for identity in identities)

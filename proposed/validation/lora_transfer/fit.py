@@ -23,9 +23,7 @@ def active_model(model, endpoint, revision):
         yield active
 
 
-def fit(settings, report, output, device, prompts, cohort):
-    import torch
-
+def calibration_inputs(settings, prompts, cohort):
     base = Path(settings["artifacts"]["rarecache"])
     spec = read(base / "calibration.json")
     examples_file = base / "fit_examples.json"
@@ -48,11 +46,25 @@ def fit(settings, report, output, device, prompts, cohort):
             raise ValueError(f"Base mapper or local snapshot differs for {role}")
         local_models[role] = local
 
+    return base, spec, examples_file, examples, local_models
+
+
+def adapter_trace(identity, examples, scratch, *, role, endpoint, stride, device):
+    import torch
+
+    return collect(identity, examples, scratch, role=role, stride=stride,
+                   device=device, dtype=torch.bfloat16,
+                   model_context=lambda model: active_model(model, endpoint, identity.revision))
+
+
+def fit(settings, report, output, device, prompts, cohort):
+    import torch
+
+    base, spec, examples_file, examples, local_models = calibration_inputs(settings, prompts, cohort)
+
     def trace(role, endpoint, scratch):
-        identity = local_models[role]
-        return collect(identity, examples, scratch, role=role, stride=spec["stride"],
-                       device=device, dtype=torch.bfloat16,
-                       model_context=lambda model: active_model(model, endpoint, identity.revision))
+        return adapter_trace(local_models[role], examples, scratch, role=role, endpoint=endpoint,
+                             stride=spec["stride"], device=device)
 
     report["fitted_routes"] = {}
     output_root = output.parent / "lora_artifacts"

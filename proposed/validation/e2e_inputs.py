@@ -59,7 +59,7 @@ def qa_inputs(path, pair):
 
 def artifact_manifest(method, directory):
     path = Path(directory)
-    name = "calibration.json" if method in {"rarecache", "cachebridge"} else "config.json"
+    name = "calibration.json" if method in {"rarecache", "cachebridge", "cachebridge_v2"} else "config.json"
     weights = list(path.rglob("*.safetensors"))
     if not weights:
         raise FileNotFoundError(f"No {method} checkpoints in {path}")
@@ -118,13 +118,33 @@ def resolve_settings(config):
         reuse = {"path": str(dataset), "sha256": digest, "dataset": "QASPER v0.3 test"}
         if not profile["scenarios"]:
             raise ValueError("Reuse profiles require at least one scenario")
-    elif not 3 <= profile["documents"] <= len(old["cohort"]):
+    elif not profile.get("fit_only") and not 3 <= profile["documents"] <= len(old["cohort"]):
         raise ValueError("Profile document count is outside the completed QA cohort")
     if not Path(old["dataset"]).is_file():
         raise FileNotFoundError(old["dataset"])
     for snapshot in result["model_snapshots"].values():
         if not (Path(snapshot) / "config.json").is_file():
             raise FileNotFoundError(f"Model snapshot is missing at {snapshot}")
+    common = {
+        "repo": {"path": str(root), "git": git_state(root)},
+        "pair": pair, "profile_name": profile_name, "profile": profile,
+        "qa_report": str(path), "qa_report_sha256": input_digest,
+        "qa_commit": qa["commit"], "dataset_sha256": result["dataset_sha256"],
+        "models": result["models"], "model_snapshots": result["model_snapshots"],
+        "minimum_free_gib": config.E2E_MIN_FREE_GIB[result["models"]["target"]["name"]],
+        "seed": config.E2E_SEED,
+    }
+    if profile.get("fit_only"):
+        initializer = config.E2E_CACHEBRIDGE_V2_INITIALIZERS.get(pair)
+        if initializer is None:
+            raise ValueError(f"No CacheBridge v2 initializer configured for {pair}")
+        artifact_manifest("cachebridge", initializer)
+        return {
+            **common, "reference_report": qa["reference_report"],
+            "reference_report_sha256": qa["reference_report_sha256"],
+            "cachebridge_v2_fit": {"initializer": str(initializer),
+                                   "max_history": config.E2E_CACHEBRIDGE_V2_MAX_HISTORY},
+        }
     semcache = config.E2E_SEMCACHE_ROOT.resolve()
     if not (semcache / "src/semcache/edgelora/r5_semantic_index.py").is_file():
         raise FileNotFoundError(f"R5 semantic index missing in {semcache}; set E2E_SEMCACHE_ROOT")
@@ -136,21 +156,36 @@ def resolve_settings(config):
         methods, artifacts, manifests = [], {"rarecache": base}, {"rarecache": manifest}
     else:
         methods, artifacts, manifests = artifacts_for(pair, result, old, config.E2E_CACHEBRIDGE, profile_name)
+    if profile.get("compare_cachebridge_v2"):
+        job = str(config.E2E_CACHEBRIDGE_V2_FIT_JOB)
+        if not job.isdecimal():
+            raise ValueError("Set E2E_CACHEBRIDGE_V2_FIT_JOB to the completed fit job ID")
+        fit_dir = config.E2E_OUTPUT_ROOT / f"e2e_{job}"
+        fit = read(fit_dir / REPORT)
+        artifact = fit_dir / "artifact"
+        if (fit["status"] != "complete" or fit["settings"]["profile_name"] != "cachebridge_v2_fit"
+                or fit["settings"]["pair"] != pair or fit["settings"]["models"] != common["models"]
+                or fit["settings"]["reference_report_sha256"] != qa["reference_report_sha256"]
+                or fit["settings"]["dataset_sha256"] != common["dataset_sha256"]
+                or "cachebridge" not in methods):
+            raise ValueError("CacheBridge v2 fit and comparison inputs differ")
+        manifest = artifact_manifest("cachebridge_v2", artifact)
+        if fit.get("artifact_manifest") != manifest:
+            raise ValueError("CacheBridge v2 checkpoint differs from the completed fit")
+        methods.insert(methods.index("cachebridge") + 1, "cachebridge_v2")
+        artifacts["cachebridge_v2"] = str(artifact)
+        manifests["cachebridge_v2"] = manifest
     hub_cache = getattr(config, "E2E_HF_HUB_CACHE", None)
     settings = {
         **({"reuse_dataset": reuse} if reuse is not None else {}),
-        "repo": {"path": str(root), "git": git_state(root)},
-        "pair": pair, "profile_name": profile_name, "profile": profile,
-        "qa_report": str(path), "qa_report_sha256": input_digest,
-        "qa_commit": qa["commit"], "dataset_sha256": result["dataset_sha256"],
-        "models": result["models"], "model_snapshots": result["model_snapshots"],
+        **common,
         "artifacts": artifacts, "artifact_manifest": manifests, "methods": methods,
-        "minimum_free_gib": config.E2E_MIN_FREE_GIB[result["models"]["target"]["name"]],
         "semcache_root": str(semcache),
         "tinybert_dir": str(config.E2E_TINYBERT_DIR) if config.E2E_TINYBERT_DIR else None,
         "hf_hub_cache": str(Path(hub_cache).expanduser().resolve()) if hub_cache else None,
-        "seed": config.E2E_SEED, "repair_fraction": config.E2E_REPAIR_FRACTION,
+        "repair_fraction": config.E2E_REPAIR_FRACTION,
     }
+
     if profile.get("lora_stage"):
         from .lora_transfer.settings import resolve_lora
 

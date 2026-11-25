@@ -22,7 +22,7 @@ class AffineMapper:
         self.source = ModelIdentity(**self.spec["source"])
         self.target = ModelIdentity(**self.spec["target"])
         self.device = device
-        self.head_local = self.spec["variant"] in {"head-local", "attn-repair"}
+        self.head_local = self.spec["variant"] in {"head-local", "attn-repair", "layer-ordered-readout"}
         self.score_fn = score_fn
         self.layers = [load_file(str(root / f"layer_{layer:03d}.safetensors"),
                                  device=str(device)) for layer in range(self.target.layers)]

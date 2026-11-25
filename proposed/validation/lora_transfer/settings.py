@@ -56,5 +56,7 @@ def resolve_lora(config, settings):
         if result["route"] != route or artifact_manifest("rarecache", artifact) != result["manifest"]:
             raise ValueError(f"LoRA calibration artifact or route differs for {route_name}")
         route.update(artifact=str(artifact), manifest=result["manifest"])
+    if profile.get("lora_cachebridge_v2_history"):
+        settings["methods"].append("lora_cachebridge_v2")
     settings["lora_fit_job"] = job
     return settings

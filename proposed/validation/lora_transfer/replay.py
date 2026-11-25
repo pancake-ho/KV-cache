@@ -31,20 +31,32 @@ def assign_adapters(trace, route):
     ]
 
 
-def transfer_for(method, settings, route_name, identities, snapshots, device):
+def transfer_for(method, settings, route_name, identities, snapshots, device, *, cachebridge_fit=None):
     from ...src.kv_transfer.affine import AffineKVMapper
 
     if method in {"full", "exact"}:
         return None, None
     route = settings["lora_routes"][route_name]
     route_pair = {role: route[role] for role in ("source", "target")}
-    path = Path(settings["artifacts"]["rarecache"] if method == "lora_base" else route["artifact"])
-    if method == "lora_fitted" and artifact_manifest("rarecache", path) != route["manifest"]:
-        raise ValueError("LoRA mapper checkpoint changed after resolving settings")
-    mapper = AffineKVMapper(path, "rarecache", identities, snapshots, device,
+    mapper_method = "rarecache"
+    if method == "lora_base":
+        path = Path(settings["artifacts"]["rarecache"])
+        manifest = settings["artifact_manifest"]["rarecache"]
+    elif method == "lora_fitted":
+        path = Path(route["artifact"])
+        manifest = route["manifest"]
+    elif method == "lora_cachebridge_v2" and cachebridge_fit is not None:
+        mapper_method = "cachebridge_v2"
+        path = Path(cachebridge_fit["artifact"])
+        manifest = cachebridge_fit["manifest"]
+    else:
+        raise ValueError(f"Unknown or unfitted LoRA serving method {method}")
+    if artifact_manifest(mapper_method, path) != manifest:
+        raise ValueError(f"{method} mapper checkpoint differs from the fitted artifact")
+    mapper = AffineKVMapper(path, mapper_method, identities, snapshots, device,
                             repair_fraction=settings["repair_fraction"])
-    recorded = mapper.metadata.get("lora_route")
-    if (method == "lora_base" and recorded is not None) or (method == "lora_fitted" and recorded != route_pair):
+    expected_route = None if method == "lora_base" else route_pair
+    if mapper.metadata.get("lora_route") != expected_route:
         raise ValueError("Mapper was calibrated for a different adapter route")
     return AdapterPairKVTransfer(mapper, route["source"], route["target"]), {
         "artifact": str(path), "lora_route": route_pair, "storage": "GPU",
