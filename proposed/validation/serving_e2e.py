@@ -55,9 +55,18 @@ def load_transfer(method, settings, identities, snapshots, target, device):
 
 
 def run_trace(runtime, method, transfer, make_index, trace, case, budget, codec):
+    policy_name = case.get("cache_policy", "lru")
+    policy = None
+    if policy_name != "lru" and method != "full":
+        from ..src.cache.semcache_policy import SemCachePrefixPolicy
+
+        if policy_name != SemCachePrefixPolicy.name:
+            raise ValueError(f"Unknown native prefix cache policy: {policy_name}")
+        policy = SemCachePrefixPolicy()
     cache = None if method == "full" else PrefixCache(
-        make_index(), case["cache_mib"] << 20, codec=codec)
-    engine = ServingEngine(runtime, cache=cache, transfer=transfer)
+        make_index(), case["cache_mib"] << 20, codec=codec, policy=policy)
+    engine = ServingEngine(runtime, cache=cache, transfer=transfer,
+                           collect_cache_metrics="cache_policy" in case)
     rows = []
     for event in trace:
         if "reuse_count" in case:
@@ -161,7 +170,13 @@ def models_and_prompts(settings, qa, old, device, *, load_runtime=True):
 def evaluate(settings, report, output):
     import socket
 
-    semcache = Path(settings["semcache_root"]) / "src"
+    semcache_root = Path(settings["semcache_root"])
+    if expected_git := settings.get("semcache_git"):
+        from .semcache_d5 import d5_git_state
+
+        if d5_git_state(semcache_root) != expected_git:
+            raise ValueError("SemCache source changed after resolving settings")
+    semcache = semcache_root / "src"
     root = Path(settings["repo"]["path"])
     sys.path[:0] = [str(semcache), str(root / "baseline/crosskv/src")]
     os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
@@ -337,6 +352,19 @@ def evaluate(settings, report, output):
                 )
                 methods[method] = {"summary": summary, "documents": per_doc, "replays": replays,
                                    "mapper": metadata, "paired_vs_full": delta}
+                if case.get("cache_policy") == "semcache_frequency_age_size":
+                    baseline = report["results"]["lru"]["methods"][method]
+                    for sample, reference in zip(replays, baseline["replays"], strict=True):
+                        ids = [row["request_id"] for row in sample["requests"]]
+                        if ids != [row["request_id"] for row in reference["requests"]]:
+                            raise ValueError("LRU and SemCache used different ordered requests")
+                    methods[method]["paired_vs_lru"] = {
+                        **paired_deltas(per_doc, baseline["documents"], settings["seed"]),
+                        "trace_wall_ms_by_replay": [
+                            1000 * (sample["wall_seconds"] - reference["wall_seconds"])
+                            for sample, reference in zip(replays, baseline["replays"], strict=True)
+                        ],
+                    }
                 write(output, report)
                 if lora_stage:
                     transfer = None

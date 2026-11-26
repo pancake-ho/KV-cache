@@ -162,3 +162,16 @@ E2E_PROFILES.update({
         "lora_cachebridge_v2_history": E2E_CACHEBRIDGE_V2_MAX_HISTORY,
     },
 })
+
+# Paired LRU vs SemCache scoring under the same native-prefix cache pressure.
+E2E_SEMCACHE_POLICY_CASES = [
+    {**E2E_REUSE_CASE, "id": "lru", "cache_mib": 512, "cache_policy": "lru"},
+    {**E2E_REUSE_CASE, "id": "semcache", "cache_mib": 512,
+     "cache_policy": "semcache_frequency_age_size"},
+]
+E2E_PROFILES["semcache_policy_pressure"] = {
+    **E2E_PROFILES["reuse_pressure"], "scenarios": E2E_SEMCACHE_POLICY_CASES,
+}
+E2E_PROFILES["semcache_policy_pilot"] = {
+    **E2E_PROFILES["semcache_policy_pressure"], "documents": 4, "repeats": 1, "new_tokens": 8,
+}

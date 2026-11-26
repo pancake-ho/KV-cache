@@ -1,0 +1,794 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index e97ef9e9d627b6923f890a4956c37963c505650c..19ac2c3ec648ca8c2e18ae2a90c7b15411304406 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -54,6 +54,8 @@ Do not recommend large refactors unless they are required to fix an actual probl
+ - Extend the existing implementation first when its responsibilities and caller behavior are compatible.
+ - Isolate experiment-specific behavior when combining it with existing code would mix incompatible contracts. Keep shared logic in its existing module.
+ - Group experiment-specific modules under a clearly named directory and name each file for its responsibility. Reuse the existing configuration and entry point when they already fit.
++- Delete code made obsolete by a change after checking its callers. Do not keep backup copies in the repository.
++- Preserve other top-architecture paths and check their existing interfaces when changing SemCache or another shared module.
+ 
+ ---
+ 
+diff --git a/docs/QWEN3_SEMCACHE_SERVING.md b/docs/QWEN3_SEMCACHE_SERVING.md
+index 3f0f61c90b2492ce4a9583db23ae4c0648d07e2c..3b1dd5d3a95d8e811567beea796e940e2d88ff19 100644
+--- a/docs/QWEN3_SEMCACHE_SERVING.md
++++ b/docs/QWEN3_SEMCACHE_SERVING.md
+@@ -192,3 +192,49 @@ The scope is the existing sequential single-GPU engine. TTFT, request
+ latency, F1 and EM are measured on target questions. Throughput and peak
+ memory cover the whole trace, including prefix producers. The report
+ distinguishes actual cache hits, resident KV bytes and allocator peaks.
++
++## Compare SemCache policy with LRU
++
++Use an existing checkout of GP_semcache branch `exp/d5-l1-l5-lightperf` at
++`5f325c542196e737a94dedc3f059d4f087d1b251`. The evaluator records and
++rechecks this revision. The Qwen3 experiment applies the upstream scores to
++native KV prefix entries using recent appearance frequency, actual reuse
++frequency, age and stored bytes. It rescales the weights for those signals.
++OPT's window-level attention impact remains in the D5 backend. Both Qwen3
++policies use the same ordered QASPER requests, 512 MiB budget, runtime and
++available mapper artifacts. Full prefill runs without a cache.
++
++```bash
++export KV_TOP_SEMCACHE_ROOT=/absolute/path/to/GP_semcache
++export KV_TOP_E2E_PROFILE=semcache_policy_pilot
++mkdir -p logs
++sbatch run/seraph/qwen3_serving_e2e.sh
++```
++
++Use `semcache_policy_pressure` for the 12-document, two-replay profile. As in
++`reuse_pressure`, set the completed QA report and locally staged QASPER
++archive in `proposed/validation/config.py`. Read `paired_vs_lru` in the report
++for same-method TTFT and F1 comparisons and whole-trace wall-time differences.
++`cache_policy_metrics` records admission decisions, eviction counts and
++bytes, and policy timings. Policy timing fields are nested inside existing
++snapshot, admission and request timings. Include producer requests when
++reading the whole-trace values. Existing profiles still select LRU.
++
++## Run the D5 OPT backend
++
++The Top checkout delegates D5 commands to the pinned GP checkout. Run these
++from the Top repository root with an interpreter that satisfies upstream's
++job prerequisites. The four command families preserve the GP argument and
++artifact contracts.
++
++```bash
++python -m proposed.validation.semcache_d5 lightperf --help
++python -m proposed.validation.semcache_d5 sweep --help
++python -m proposed.validation.semcache_d5 l6b --help
++python -m proposed.validation.semcache_d5 recovery --help
++```
++
++For real OPT runs, follow the GP runbooks and use their prepared artifacts
++and resource limits. The Qwen3 Slurm entry point and its 29G allocation are
++for Qwen3. L6-B requires a separate 64G allocation. D5 Lightperf still owns
++the ES–UD TCP transport, Partial QKV, L2C/L2E, and replay/recovery workflows.
+diff --git a/proposed/src/cache/prefix.py b/proposed/src/cache/prefix.py
+index 1e528cb44958018313b581c9225112d003d9ede5..eeade1b701a90d91c40f918c25ca7be5acebb4b9 100644
+--- a/proposed/src/cache/prefix.py
++++ b/proposed/src/cache/prefix.py
+@@ -34,6 +34,7 @@ class Lookup:
+     semantic_encoding_ms: float
+     cluster_assignment_ms: float
+     candidate_lookup_ms: float
++    policy_observation_ms: float = 0.0
+ 
+ 
+ def route_rejection(entry, request, adapter_sha256, transfer):
+@@ -54,19 +55,25 @@ def route_rejection(entry, request, adapter_sha256, transfer):
+ 
+ 
+ class PrefixCache:
+-    """One process, exact zero-based prefixes and byte-bounded LRU."""
++    """One process, exact zero-based prefixes and byte-bounded KV ownership."""
+ 
+-    def __init__(self, index, capacity_bytes: int, *, codec: KVBitpackCodec | None = None):
++    def __init__(self, index, capacity_bytes: int, *, codec: KVBitpackCodec | None = None, policy=None):
+         if capacity_bytes < 1:
+             raise ValueError("cache capacity must be positive")
+         self.index = index
+         self.capacity_bytes = capacity_bytes
+         self.codec = codec
++        self.policy = policy
+         self.entries: OrderedDict[str, Entry] = OrderedDict()
+         self.bytes = 0
+         self.evictions = 0
+ 
+     def lookup(self, request: Request, *, adapter_sha256: str | None = None, transfer=None) -> Lookup:
++        observation_ms = 0.0
++        if self.policy is not None:
++            start = perf_counter()
++            self.policy.observe(request, adapter_sha256)
++            observation_ms = (perf_counter() - start) * 1000
+         assignment = self.index.assign(request.text)
+         start = perf_counter()
+         candidates = self.index.discover(assignment["cluster_id"], request.token_ids)
+@@ -89,15 +96,29 @@ class PrefixCache:
+             rejected[reason] = rejected.get(reason, 0) + 1
+         return Lookup(hit, assignment["cluster_id"], len(candidates), rejected,
+                       assignment["semantic_encoding_ms"], assignment["cluster_assignment_ms"],
+-                      (perf_counter() - start) * 1000)
++                      (perf_counter() - start) * 1000, observation_ms)
+ 
+-    def snapshot(self, request: Request, layers: Layers, adapter_sha256: str | None = None) -> Entry | None:
++    def snapshot(self, request: Request, layers: Layers, adapter_sha256: str | None = None,
++                 *, metrics=None) -> Entry | None:
+         if len(request.token_ids) < 3:
++            if metrics is not None:
++                metrics["admission"] = "short_prefix"
+             return None
+         size = (self.codec.encoded_size(layers) if self.codec is not None else
+                 sum(t.numel() * t.element_size() for pair in layers for t in pair))
+         if size > self.capacity_bytes:
++            if metrics is not None:
++                metrics["admission"] = "oversize"
+             return None
++        if self.policy is not None:
++            start = perf_counter()
++            admitted = self.policy.admit(request, adapter_sha256, size, self.entries)
++            if metrics is not None:
++                metrics["admission_policy_ms"] = (perf_counter() - start) * 1000
++            if not admitted:
++                if metrics is not None:
++                    metrics["admission"] = "below_policy_threshold"
++                return None
+         # Own an immutable prefill snapshot before the request's DynamicCache grows.
+         if self.codec is None:
+             owned = tuple((k.detach().clone(), v.detach().clone()) for k, v in layers)
+@@ -110,7 +131,7 @@ class PrefixCache:
+             return entry.layers
+         return self.codec.decode(entry.layers)
+ 
+-    def admit(self, entry: Entry, cluster_id: int) -> None:
++    def admit(self, entry: Entry, cluster_id: int, *, metrics=None) -> None:
+         if not 0 < entry.size_bytes <= self.capacity_bytes:
+             raise ValueError("invalid cache entry byte size")
+         request = entry.request
+@@ -119,11 +140,36 @@ class PrefixCache:
+         key = request.request_id
+         if key in self.entries:
+             raise ValueError(f"duplicate cache entry: {key}")
+-        while self.bytes + entry.size_bytes > self.capacity_bytes:
+-            victim = next(iter(self.entries))
++        required = self.bytes + entry.size_bytes - self.capacity_bytes
++        victims = []
++        if required > 0:
++            start = perf_counter()
++            order = self.entries if self.policy is None else self.policy.eviction_order(self.entries, entry)
++            for victim in order:
++                if victim == key:
++                    if metrics is not None:
++                        metrics["admission"] = "insufficient_policy_priority"
++                        metrics["eviction_selection_ms"] = (perf_counter() - start) * 1000
++                    return
++                victims.append(victim)
++                required -= self.entries[victim].size_bytes
++                if required <= 0:
++                    break
++            if metrics is not None:
++                metrics["eviction_selection_ms"] = (perf_counter() - start) * 1000
++        start = perf_counter() if metrics is not None else None
++        evicted_bytes = 0
++        for victim in victims:
+             self.index.invalidate(victim)
+-            self.bytes -= self.entries.pop(victim).size_bytes
++            size = self.entries.pop(victim).size_bytes
++            self.bytes -= size
++            evicted_bytes += size
+             self.evictions += 1
++            if self.policy is not None:
++                self.policy.remove(victim)
++        if metrics is not None:
++            metrics.update(evictions=len(victims), evicted_bytes=evicted_bytes,
++                           eviction_ms=(perf_counter() - start) * 1000 if victims else 0.0)
+         self.index.add(key, {
+             "entry_id": key,
+             "source_request_id": key,
+@@ -133,3 +179,7 @@ class PrefixCache:
+         })
+         self.entries[key] = entry
+         self.bytes += entry.size_bytes
++        if self.policy is not None:
++            self.policy.insert(key)
++        if metrics is not None:
++            metrics["admission"] = "stored"
+diff --git a/proposed/src/cache/semcache_policy.py b/proposed/src/cache/semcache_policy.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7fd7a0685397e393da1e2887b7bd5375c7a6ca9d
+--- /dev/null
++++ b/proposed/src/cache/semcache_policy.py
+@@ -0,0 +1,88 @@
++"""Adapt SemCache admission and eviction scores to native KV prefix entries."""
++
++from collections import Counter, deque
++from dataclasses import dataclass
++
++from semcache.cache.admission import AdmissionPolicy
++from semcache.cache.cache_metrics import CacheMetrics, normalize
++from semcache.cache.eviction import EvictionPolicy
++
++
++@dataclass
++class Residency:
++    last_reuse: int
++    hits: int = 0
++
++
++class SemCachePrefixPolicy:
++    """Score whole prefixes by frequency, age and stored bytes.
++
++    The OPT row-level attention signal is unavailable in Qwen's native path.
++    Renormalize the remaining upstream weights. The query clock advances on
++    lookup, while a reuse is counted only after the request executes.
++    """
++
++    name = "semcache_frequency_age_size"
++
++    def __init__(self, history_requests: int = 100):
++        if history_requests < 1:
++            raise ValueError("SemCache history must contain at least one request")
++        self.admission = AdmissionPolicy(alpha=5 / 7, beta=0, delta=2 / 7)
++        self.eviction = EvictionPolicy(alpha=4 / 7, beta=0, gamma=2 / 7, delta=1 / 7)
++        self.history_requests = history_requests
++        self.clock = 0
++        self.history = deque()
++        self.frequency = Counter()
++        self.resident: dict[str, Residency] = {}
++
++    @staticmethod
++    def _key(request, adapter_sha256):
++        return (request.model_id, request.adapter_id, adapter_sha256,
++                request.share_group, request.token_ids)
++
++    def observe(self, request, adapter_sha256):
++        self.clock += 1
++        key = self._key(request, adapter_sha256)
++        self.history.append((self.clock, key))
++        self.frequency[key] += 1
++        while self.history and self.history[0][0] <= self.clock - self.history_requests:
++            _, old = self.history.popleft()
++            self.frequency[old] -= 1
++            if self.frequency[old] == 0:
++                del self.frequency[old]
++
++    def admit(self, request, adapter_sha256, size_bytes, entries):
++        def metrics(req, fingerprint, size):
++            return CacheMetrics(self.frequency[self._key(req, fingerprint)], 0, 0, size)
++
++        candidate = metrics(request, adapter_sha256, size_bytes)
++        population = [metrics(e.request, e.adapter_sha256, e.size_bytes) for e in entries.values()]
++        return self.admission.admit(normalize(candidate, [*population, candidate]))
++
++    def eviction_order(self, entries, candidate):
++        """Rank the candidate and residents once for a single admission."""
++        metrics = {}
++        for key, entry in entries.items():
++            state = self.resident[key]
++            metrics[key] = CacheMetrics(state.hits, 0, self.clock - state.last_reuse, entry.size_bytes)
++        metrics[candidate.request.request_id] = CacheMetrics(0, 0, 0, candidate.size_bytes)
++        population = metrics.values()
++        maxima = CacheMetrics(max(m.frequency for m in population), 0,
++                              max(m.age for m in population), max(m.size for m in population))
++        scores = {key: self.eviction.score(normalize(value, (maxima,)))
++                  for key, value in metrics.items()}
++        return sorted(scores, key=lambda key: (-scores[key], key))
++
++    def insert(self, request_id: str):
++        self.resident[request_id] = Residency(last_reuse=self.clock)
++
++    def remove(self, request_id: str):
++        del self.resident[request_id]
++
++    def reuse(self, entry):
++        state = self.resident[entry.request.request_id]
++        state.hits += 1
++        state.last_reuse = self.clock
++        key = self._key(entry.request, entry.adapter_sha256)
++        self.history.append((self.clock, key))
++        self.frequency[key] += 1
+diff --git a/proposed/src/serving/engine.py b/proposed/src/serving/engine.py
+index fccaef1f1fe3d89f62b757f7abbb9db740d8713f..863e2bae22dd2bc6a3ccf55b1a76c2b60c0ca5ea 100644
+--- a/proposed/src/serving/engine.py
++++ b/proposed/src/serving/engine.py
+@@ -10,10 +10,11 @@ def elapsed_ms(start):
+ 
+ 
+ class ServingEngine:
+-    def __init__(self, runtime, *, cache=None, transfer=None):
++    def __init__(self, runtime, *, cache=None, transfer=None, collect_cache_metrics=False):
+         self.runtime = runtime
+         self.cache = cache
+         self.transfer = transfer
++        self.collect_cache_metrics = collect_cache_metrics
+ 
+     def serve(self, request: Request, budget: int):
+         if budget < 1 or not request.token_ids:
+@@ -31,6 +32,7 @@ class ServingEngine:
+ 
+         routing_ms = elapsed_ms(started)
+         lookup = None
++        cache_metrics = {} if self.collect_cache_metrics else None
+         if cache is not None:
+             lookup = cache.lookup(request, adapter_sha256=adapter_sha256, transfer=self.transfer)
+         entry = lookup.entry if lookup is not None else None
+@@ -82,6 +84,7 @@ class ServingEngine:
+             tick = perf_counter()
+             snapshot = cache.snapshot(
+                 request, self.runtime.layers(model, prefill, len(request.token_ids)), adapter_sha256,
++                metrics=cache_metrics,
+             )
+             self.runtime.sync()
+             snapshot_ms = elapsed_ms(tick)
+@@ -95,9 +98,19 @@ class ServingEngine:
+ 
+         tick = perf_counter()
+         if snapshot is not None:
+-            cache.admit(snapshot, lookup.cluster_id)
++            cache.admit(snapshot, lookup.cluster_id, metrics=cache_metrics)
+         admission_ms = elapsed_ms(tick) if snapshot is not None else 0.0
+         text = self.runtime.tokenizers[request.model_id].decode(generated, skip_special_tokens=True)
++        if entry is not None and cache.policy is not None:
++            tick = perf_counter()
++            cache.policy.reuse(entry)
++            if cache_metrics is not None:
++                cache_metrics["reuse_update_ms"] = elapsed_ms(tick)
++        if cache_metrics is not None:
++            cache_metrics["policy"] = ("disabled" if cache is None else
++                                       "lru" if cache.policy is None else cache.policy.name)
++            cache_metrics.setdefault("admission", "disabled" if cache is None else "hit")
++            cache_metrics["observation_ms"] = lookup.policy_observation_ms if lookup else 0.0
+         return {
+             "request_id": request.request_id, "user_id": request.user_id, "model_id": request.model_id,
+             "adapter_id": request.adapter_id, "adapter_sha256": adapter_sha256,
+@@ -116,6 +129,7 @@ class ServingEngine:
+             "snapshot_ms": snapshot_ms, "admission_ms": admission_ms,
+             "cache_encode_ms": snapshot_ms if compressed and snapshot is not None else 0.0,
+             "cache_decode_ms": cache_decode_ms,
++            **({"cache_policy_metrics": cache_metrics} if cache_metrics is not None else {}),
+             "application_ms": elapsed_ms(started),
+             "resident_kv_bytes": cache.bytes if cache else 0,
+         }
+diff --git a/proposed/tests/test_semcache_prefix_policy.py b/proposed/tests/test_semcache_prefix_policy.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..adaafdf665d7621fe1c4f0d40a158b85cd565961
+--- /dev/null
++++ b/proposed/tests/test_semcache_prefix_policy.py
+@@ -0,0 +1,176 @@
++"""CPU fixtures for cache ownership and serving routes with the SemCache policy."""
++
++from contextlib import contextmanager
++from pathlib import Path
++from types import SimpleNamespace
++import unittest
++from unittest.mock import patch
++
++from semcache.edgelora.r5_semantic_index import SemanticIndex
++
++from proposed.src.cache.prefix import PrefixCache
++from proposed.src.cache.semcache_policy import SemCachePrefixPolicy
++from proposed.src.kv_transfer.adapter_pair import AdapterPairKVTransfer
++from proposed.src.serving.engine import ServingEngine
++from proposed.src.serving.request import Request
++from proposed.validation import semcache_d5
++from proposed.validation.e2e_workload import Event
++from proposed.validation.serving_e2e import run_trace
++
++
++class Encoder:
++    metadata = {"fixture": True}
++
++    def encode(self, texts):
++        return [[1.0, 0.0] for _ in texts]
++
++
++class Tensor:
++    def __init__(self, ids):
++        self.ids = ids
++
++    def numel(self):
++        return len(self.ids)
++
++    def element_size(self):
++        return 1
++
++    def detach(self):
++        return self
++
++    def clone(self):
++        return Tensor(self.ids)
++
++
++def request(name, ids=(1, 2, 3), *, model="source", group="shared", adapter=None):
++    return Request(name, "q", model, " ".join(map(str, ids)), ids, group, adapter)
++
++
++class Runtime:
++    def __init__(self):
++        config = SimpleNamespace(max_position_embeddings=32)
++        self.models = {key: SimpleNamespace(config=config) for key in ("source", "target")}
++        self.tokenizers = {key: self for key in self.models}
++        self.adapters = self
++
++    @contextmanager
++    def activate(self, model_id, adapter_id):
++        yield self.models[model_id], f"{adapter_id}-sha" if adapter_id else None
++
++    def sync(self):
++        pass
++
++    def forward(self, model, ids, offset, past=None):
++        assert offset == len(past or ())
++        return SimpleNamespace(past_key_values=(past or ()) + tuple(ids), logits=self)
++
++    def __getitem__(self, key):
++        return self
++
++    def argmax(self):
++        return self
++
++    def item(self):
++        return 42
++
++    def decode(self, ids, **kwargs):
++        return " ".join(map(str, ids))
++
++    def copy_cache(self, layers, *, clone=True):
++        return layers[0][0].ids
++
++    def layers(self, model, past, length):
++        assert len(past) == length
++        return ((Tensor(past), Tensor(past)),)
++
++
++class Codec:
++    def encoded_size(self, layers):
++        return len(layers[0][0].ids)
++
++    def encode(self, layers):
++        return layers[0][0].ids
++
++    def decode(self, ids):
++        return ((Tensor(ids), Tensor(ids)),)
++
++
++class PrefixPolicyTests(unittest.TestCase):
++    def cache(self, capacity=6, codec=None):
++        policy = SemCachePrefixPolicy()
++        return PrefixCache(SemanticIndex(Encoder()), capacity, codec=codec, policy=policy)
++
++    def test_count_only_executed_reuses_and_keep_identity_guard(self):
++        cache = self.cache()
++        engine = ServingEngine(Runtime(), cache=cache, collect_cache_metrics=True)
++        engine.serve(request("source"), 1)
++        self.assertIsNone(cache.lookup(request("other", (1, 2, 3, 4), group="private")).entry)
++        probe = request("probe", (1, 2, 3, 4))
++        self.assertIsNotNone(cache.lookup(probe).entry)
++        self.assertEqual(cache.policy.resident["source"].hits, 0)
++        row = engine.serve(probe, 2)
++        self.assertEqual((row["path"], row["forwarded_prefill_tokens"]), ("native_kv_hit", 1))
++        self.assertEqual(cache.policy.resident["source"].hits, 1)
++        self.assertEqual(row["cache_policy_metrics"]["admission"], "hit")
++
++    def test_rejected_candidate_leaves_owner_intact_and_skips_copy(self):
++        cache = self.cache()
++        engine = ServingEngine(Runtime(), cache=cache, collect_cache_metrics=True)
++        engine.serve(request("source"), 1)
++        for i in range(3):
++            engine.serve(request(f"hit{i}", (1, 2, 3, 4 + i)), 1)
++        with patch.object(Tensor, "clone", side_effect=AssertionError("should not copy")):
++            row = engine.serve(request("rare", (7, 8, 9)), 1)
++        self.assertEqual(row["cache_policy_metrics"]["admission"], "below_policy_threshold")
++        self.assertEqual((list(cache.entries), cache.bytes, cache.evictions), (["source"], 6, 0))
++
++    def test_successful_eviction_keeps_index_bytes_and_policy_in_sync(self):
++        cache = self.cache()
++        engine = ServingEngine(Runtime(), cache=cache, collect_cache_metrics=True)
++        engine.serve(request("source"), 1)
++        row = engine.serve(request("next", (7, 8, 9)), 1)
++        self.assertEqual(row["cache_policy_metrics"]["evictions"], 1)
++        self.assertEqual(row["cache_policy_metrics"]["evicted_bytes"], 6)
++        self.assertEqual(cache.bytes, 6)
++        self.assertEqual(set(cache.entries), set(cache.index.entries))
++        self.assertEqual(set(cache.entries), set(cache.policy.resident))
++
++    def test_short_and_oversize_are_reported(self):
++        engine = ServingEngine(Runtime(), cache=self.cache(), collect_cache_metrics=True)
++        for ids, reason in [((1, 2), "short_prefix"), ((1, 2, 3, 4), "oversize")]:
++            row = engine.serve(request(reason, ids), 1)
++            self.assertEqual(row["cache_policy_metrics"]["admission"], reason)
++
++    def test_compressed_directed_adapter_pair_through_e2e_entry_point(self):
++        runtime = Runtime()
++        endpoints = [
++            {"model_id": model, "adapter_id": adapter, "adapter_sha256": f"{adapter}-sha"}
++            for model, adapter in (("source", "adapter-a"), ("target", "adapter-b"))
++        ]
++        mapper = SimpleNamespace(pair=("source", "target"), map_prefix=lambda layers, ids, **_: ids)
++        transfer = AdapterPairKVTransfer(mapper, *endpoints)
++        source = request("source", adapter="adapter-a")
++        target = request("qa", (1, 2, 3, 4), model="target", adapter="adapter-b")
++        trace = [Event(source, "producer", {}, None),
++                 Event(target, "cross", {"source_prefix_tokens": 3}, "source")]
++        for name in ("lru", SemCachePrefixPolicy.name):
++            case = {"cache_mib": 1, "cache_policy": name}
++            rows = run_trace(runtime, "lora_fitted", transfer, lambda: SemanticIndex(Encoder()),
++                             trace, case, 2, Codec())
++            self.assertEqual(rows[1]["path"], "cross_model_kv_hit")
++            self.assertEqual(rows[1]["reused_prefix_tokens"], 3)
++            self.assertEqual(rows[1]["cache_policy_metrics"]["policy"], name)
++        default = run_trace(runtime, "full", None, None, trace, {}, 2, None)
++        self.assertEqual(default[1]["path"], "full_recompute")
++        self.assertNotIn("cache_policy_metrics", default[1])
++
++    def test_d5_dispatch_preserves_checkout_and_upstream_arguments(self):
++        root = Path.cwd()
++        with patch.object(semcache_d5, "d5_git_state") as state, \
++                patch.object(semcache_d5.subprocess, "call", return_value=7) as child:
++            result = semcache_d5.main(["--semcache-root", str(root), "l6b", "--help"])
++        self.assertEqual(result, 7)
++        state.assert_called_once_with(root)
++        args, kwargs = child.call_args
++        self.assertEqual(args[0][1:], [str(root / "scripts/165_r5_d5_l6b.py"), "--help"])
++        self.assertEqual(kwargs["cwd"], root)
+diff --git a/proposed/validation/config.py b/proposed/validation/config.py
+index 52ed0a1198e87e4e84fc0100a9a6b7979266d316..43e6d091ab3148bed9208c746038b4eb6f3828f6 100644
+--- a/proposed/validation/config.py
++++ b/proposed/validation/config.py
+@@ -162,3 +162,16 @@ E2E_PROFILES.update({
+         "lora_cachebridge_v2_history": E2E_CACHEBRIDGE_V2_MAX_HISTORY,
+     },
+ })
++
++# Paired LRU vs SemCache scoring under the same native-prefix cache pressure.
++E2E_SEMCACHE_POLICY_CASES = [
++    {**E2E_REUSE_CASE, "id": "lru", "cache_mib": 512, "cache_policy": "lru"},
++    {**E2E_REUSE_CASE, "id": "semcache", "cache_mib": 512,
++     "cache_policy": "semcache_frequency_age_size"},
++]
++E2E_PROFILES["semcache_policy_pressure"] = {
++    **E2E_PROFILES["reuse_pressure"], "scenarios": E2E_SEMCACHE_POLICY_CASES,
++}
++E2E_PROFILES["semcache_policy_pilot"] = {
++    **E2E_PROFILES["semcache_policy_pressure"], "documents": 4, "repeats": 1, "new_tokens": 8,
++}
+diff --git a/proposed/validation/e2e_figures.py b/proposed/validation/e2e_figures.py
+index 65615b411ee261790baacb147a6b7d7308c5048e..10d1854c5c911d239e299f4c25601f4b654c3fcf 100644
+--- a/proposed/validation/e2e_figures.py
++++ b/proposed/validation/e2e_figures.py
+@@ -46,6 +46,11 @@ def table(report):
+                 "delta_f1_vs_full": delta.get("f1_points", {}).get("mean"),
+                 "delta_f1_ci95_low": f1_ci[0], "delta_f1_ci95_high": f1_ci[1],
+                 **(reuse_columns(case["scenario"], m) if "reuse" in m else {}),
++                **({"cache_policy": m["cache_policy"]["name"],
++                    "cache_policy_step": int(key == "semcache"),
++                    "delta_trace_wall_ms_vs_lru": median(result["paired_vs_lru"]["trace_wall_ms_by_replay"])
++                    if "paired_vs_lru" in result else None}
++                   if "cache_policy" in m else {}),
+                 **({"elapsed_ms_per_target_qa": m["elapsed_ms_per_target_qa"],
+                     "mapping_p50_ms": m["mapping_ms"]["p50"]}
+                    if "elapsed_ms_per_target_qa" in m else {}),
+@@ -194,6 +199,15 @@ def render(report_path, out):
+         "axes.spines.top": False, "axes.spines.right": False, "axes.linewidth": .7,
+         "axes.grid": True, "axes.axisbelow": True, "grid.color": "#e1e5e8", "grid.linewidth": .45,
+     })
++    if "cache_policy" in rows[0]:
++        plot_sweep_panels(plt, rows, out / "semcache_policy", "cache_policy_step", "Cache policy", (
++            ("elapsed_per_target_qa_ms", "Total time per target QA (ms)"),
++            ("ttft_p50_ms", "Median TTFT (ms)"),
++            ("eligible_cross_hit_pct", "Eligible cross-model hit rate (%)"),
++            ("qa_f1", "QA F1 (%)"),
++        ), tick_labels=["LRU", "SemCache"])
++        print(f"Figures {out}", flush=True)
++        return
+     if reuse_mode:
+         plot_reuse(plt, rows, out, reuse_mode)
+         print(f"Figures {out}", flush=True)
+@@ -278,7 +292,7 @@ def plot_reuse(plt, rows, out, mode):
+         plot_sweep_panels(plt, rows, out / name, x_key, x_label, metrics)
+ 
+ 
+-def plot_sweep_panels(plt, rows, path, x_key, x_label, metrics):
++def plot_sweep_panels(plt, rows, path, x_key, x_label, metrics, *, tick_labels=None):
+     ticks = sorted({row[x_key] for row in rows})
+     methods = dict.fromkeys(row["method"] for row in rows)
+     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.45), layout="constrained", sharex=True)
+@@ -291,6 +305,8 @@ def plot_sweep_panels(plt, rows, path, x_key, x_label, metrics):
+             ax.plot(*zip(*values), label="Proposed" if method == "rarecache" else method_label,
+                     color=color, marker=marker, linestyle=linestyle, linewidth=1.35, markersize=4)
+         ax.set(ylabel=label, xticks=ticks)
++        if tick_labels is not None:
++            ax.set_xticks(ticks, tick_labels)
+         ax.grid(axis="x", visible=False)
+         if label.endswith("(%)"):
+             ax.set_ylim(-4, 104)
+diff --git a/proposed/validation/e2e_inputs.py b/proposed/validation/e2e_inputs.py
+index ed5c0e9c3f878a4093fe9e12f9b67f8c6acd44d8..77f53a1118c836eb82023bceb42a9f933abb98b9 100644
+--- a/proposed/validation/e2e_inputs.py
++++ b/proposed/validation/e2e_inputs.py
+@@ -2,6 +2,7 @@
+ 
+ import hashlib
+ import json
++import os
+ from pathlib import Path, PurePosixPath
+ from zipfile import ZipFile
+ 
+@@ -97,11 +98,12 @@ def artifacts_for(pair, result, old, cachebridge, profile):
+ def resolve_settings(config):
+     """Snapshot evaluator settings once inside the Slurm allocation."""
+     from .semcache_smoke import git_state
++    from .semcache_d5 import CHECKOUT_ENV, d5_git_state
+ 
+     root = config.REPO_ROOT
+     path = Path(config.E2E_QA_REPORT or locate_qa(config.E2E_RESULTS, config.E2E_QA_JOB)).resolve()
+     pair = config.E2E_PAIR
+-    profile_name = config.E2E_PROFILE
++    profile_name = os.environ.get("KV_TOP_E2E_PROFILE", config.E2E_PROFILE)
+     profile = config.E2E_PROFILES[profile_name]
+     input_digest = sha(path)
+     qa, result, old = qa_inputs(path, pair)
+@@ -145,9 +147,13 @@ def resolve_settings(config):
+             "cachebridge_v2_fit": {"initializer": str(initializer),
+                                    "max_history": config.E2E_CACHEBRIDGE_V2_MAX_HISTORY},
+         }
+-    semcache = config.E2E_SEMCACHE_ROOT.resolve()
++    external_checkout = os.environ.get(CHECKOUT_ENV)
++    semcache = Path(external_checkout or config.E2E_SEMCACHE_ROOT).expanduser().resolve()
+     if not (semcache / "src/semcache/edgelora/r5_semantic_index.py").is_file():
+         raise FileNotFoundError(f"R5 semantic index missing in {semcache}; set E2E_SEMCACHE_ROOT")
++    semcache_git = None
++    if external_checkout or any("cache_policy" in case for case in profile["scenarios"]):
++        semcache_git = d5_git_state(semcache)
+     if profile.get("lora_stage"):
+         base = result["fit"]["artifact"]
+         manifest = artifact_manifest("rarecache", base)
+@@ -181,6 +187,7 @@ def resolve_settings(config):
+         **common,
+         "artifacts": artifacts, "artifact_manifest": manifests, "methods": methods,
+         "semcache_root": str(semcache),
++        **({"semcache_git": semcache_git} if semcache_git is not None else {}),
+         "tinybert_dir": str(config.E2E_TINYBERT_DIR) if config.E2E_TINYBERT_DIR else None,
+         "hf_hub_cache": str(Path(hub_cache).expanduser().resolve()) if hub_cache else None,
+         "repair_fraction": config.E2E_REPAIR_FRACTION,
+diff --git a/proposed/validation/e2e_workload.py b/proposed/validation/e2e_workload.py
+index 09be43ce05404299d88a6159ae29f03ef23a7995..fffdc79c5bc10cdcf7892906f673d15c334a72fd 100644
+--- a/proposed/validation/e2e_workload.py
++++ b/proposed/validation/e2e_workload.py
+@@ -132,6 +132,19 @@ def summarize(replays, *, trace=None, cache_capacity_bytes=None):
+     }
+     if trace is not None:
+         summary["reuse"] = summarize_reuse(replays, consumers, trace, cache_capacity_bytes)
++    if "cache_policy_metrics" in all_rows[0]:
++        policy_rows = [row["cache_policy_metrics"] for row in all_rows]
++        summary["cache_policy"] = {
++            "name": policy_rows[0]["policy"],
++            "admission_outcomes": dict(Counter(row["admission"] for row in policy_rows)),
++            "evictions": sum(row.get("evictions", 0) for row in policy_rows),
++            "evicted_bytes": sum(row.get("evicted_bytes", 0) for row in policy_rows),
++            "mean_ms_per_trace_request": {
++                name: mean(row.get(name, 0.0) for row in policy_rows)
++                for name in ("observation_ms", "admission_policy_ms", "eviction_selection_ms",
++                             "eviction_ms", "reuse_update_ms")
++            },
++        }
+     return summary, rows
+ 
+ 
+diff --git a/proposed/validation/semcache_d5.py b/proposed/validation/semcache_d5.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2794d93cddcfa2a513974526cb85abffd0fbade4
+--- /dev/null
++++ b/proposed/validation/semcache_d5.py
+@@ -0,0 +1,50 @@
++"""Validate the local D5 checkout and delegate its OPT experiment commands."""
++
++import argparse
++import os
++from pathlib import Path
++import subprocess
++import sys
++
++from .semcache_smoke import git_state
++
++
++D5_COMMIT = "5f325c542196e737a94dedc3f059d4f087d1b251"
++CHECKOUT_ENV = "KV_TOP_SEMCACHE_ROOT"
++SCRIPTS = {
++    "lightperf": "159_r5_d5_lightperf.py",
++    "sweep": "163_r5_d5_sweep_v5.py",
++    "l6b": "165_r5_d5_l6b.py",
++    "recovery": "166_r5_d5_l6_recovery.py",
++}
++
++
++def d5_git_state(root: Path) -> dict:
++    state = git_state(root)
++    if state["commit"] != D5_COMMIT or state["status"]:
++        raise ValueError(f"Expected a clean SemCache checkout at {D5_COMMIT}: {root}")
++    missing = [name for name in SCRIPTS.values() if not (root / "scripts" / name).is_file()]
++    if missing:
++        raise FileNotFoundError(f"D5 entry points missing at {root}: {', '.join(missing)}")
++    return state
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--semcache-root", default=os.environ.get(CHECKOUT_ENV), type=Path)
++    parser.add_argument("experiment", choices=SCRIPTS)
++    parser.add_argument("arguments", nargs=argparse.REMAINDER)
++    args = parser.parse_args(argv)
++    if args.semcache_root is None:
++        parser.error(f"provide --semcache-root or set {CHECKOUT_ENV}")
++    root = args.semcache_root.expanduser().resolve()
++    try:
++        d5_git_state(root)
++    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
++        parser.error(str(exc))
++    return subprocess.call([sys.executable, str(root / "scripts" / SCRIPTS[args.experiment]),
++                            *args.arguments], cwd=root)
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/proposed/validation/serving_e2e.py b/proposed/validation/serving_e2e.py
+index aa2c2eb415782aead71afb476aae3f3a8e651a42..6600b821db87e00e50061dd76961fcbdbbdc2cfe 100644
+--- a/proposed/validation/serving_e2e.py
++++ b/proposed/validation/serving_e2e.py
+@@ -55,9 +55,18 @@ def load_transfer(method, settings, identities, snapshots, target, device):
+ 
+ 
+ def run_trace(runtime, method, transfer, make_index, trace, case, budget, codec):
++    policy_name = case.get("cache_policy", "lru")
++    policy = None
++    if policy_name != "lru" and method != "full":
++        from ..src.cache.semcache_policy import SemCachePrefixPolicy
++
++        if policy_name != SemCachePrefixPolicy.name:
++            raise ValueError(f"Unknown native prefix cache policy: {policy_name}")
++        policy = SemCachePrefixPolicy()
+     cache = None if method == "full" else PrefixCache(
+-        make_index(), case["cache_mib"] << 20, codec=codec)
+-    engine = ServingEngine(runtime, cache=cache, transfer=transfer)
++        make_index(), case["cache_mib"] << 20, codec=codec, policy=policy)
++    engine = ServingEngine(runtime, cache=cache, transfer=transfer,
++                           collect_cache_metrics="cache_policy" in case)
+     rows = []
+     for event in trace:
+         if "reuse_count" in case:
+@@ -161,7 +170,13 @@ def models_and_prompts(settings, qa, old, device, *, load_runtime=True):
+ def evaluate(settings, report, output):
+     import socket
+ 
+-    semcache = Path(settings["semcache_root"]) / "src"
++    semcache_root = Path(settings["semcache_root"])
++    if expected_git := settings.get("semcache_git"):
++        from .semcache_d5 import d5_git_state
++
++        if d5_git_state(semcache_root) != expected_git:
++            raise ValueError("SemCache source changed after resolving settings")
++    semcache = semcache_root / "src"
+     root = Path(settings["repo"]["path"])
+     sys.path[:0] = [str(semcache), str(root / "baseline/crosskv/src")]
+     os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
+@@ -337,6 +352,19 @@ def evaluate(settings, report, output):
+                 )
+                 methods[method] = {"summary": summary, "documents": per_doc, "replays": replays,
+                                    "mapper": metadata, "paired_vs_full": delta}
++                if case.get("cache_policy") == "semcache_frequency_age_size":
++                    baseline = report["results"]["lru"]["methods"][method]
++                    for sample, reference in zip(replays, baseline["replays"], strict=True):
++                        ids = [row["request_id"] for row in sample["requests"]]
++                        if ids != [row["request_id"] for row in reference["requests"]]:
++                            raise ValueError("LRU and SemCache used different ordered requests")
++                    methods[method]["paired_vs_lru"] = {
++                        **paired_deltas(per_doc, baseline["documents"], settings["seed"]),
++                        "trace_wall_ms_by_replay": [
++                            1000 * (sample["wall_seconds"] - reference["wall_seconds"])
++                            for sample, reference in zip(replays, baseline["replays"], strict=True)
++                        ],
++                    }
+                 write(output, report)
+                 if lora_stage:
+                     transfer = None

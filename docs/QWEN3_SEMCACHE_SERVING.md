@@ -192,3 +192,49 @@ The scope is the existing sequential single-GPU engine. TTFT, request
 latency, F1 and EM are measured on target questions. Throughput and peak
 memory cover the whole trace, including prefix producers. The report
 distinguishes actual cache hits, resident KV bytes and allocator peaks.
+
+## Compare SemCache policy with LRU
+
+Use an existing checkout of GP_semcache branch `exp/d5-l1-l5-lightperf` at
+`5f325c542196e737a94dedc3f059d4f087d1b251`. The evaluator records and
+rechecks this revision. The Qwen3 experiment applies the upstream scores to
+native KV prefix entries using recent appearance frequency, actual reuse
+frequency, age and stored bytes. It rescales the weights for those signals.
+OPT's window-level attention impact remains in the D5 backend. Both Qwen3
+policies use the same ordered QASPER requests, 512 MiB budget, runtime and
+available mapper artifacts. Full prefill runs without a cache.
+
+```bash
+export KV_TOP_SEMCACHE_ROOT=/absolute/path/to/GP_semcache
+export KV_TOP_E2E_PROFILE=semcache_policy_pilot
+mkdir -p logs
+sbatch run/seraph/qwen3_serving_e2e.sh
+```
+
+Use `semcache_policy_pressure` for the 12-document, two-replay profile. As in
+`reuse_pressure`, set the completed QA report and locally staged QASPER
+archive in `proposed/validation/config.py`. Read `paired_vs_lru` in the report
+for same-method TTFT and F1 comparisons and whole-trace wall-time differences.
+`cache_policy_metrics` records admission decisions, eviction counts and
+bytes, and policy timings. Policy timing fields are nested inside existing
+snapshot, admission and request timings. Include producer requests when
+reading the whole-trace values. Existing profiles still select LRU.
+
+## Run the D5 OPT backend
+
+The Top checkout delegates D5 commands to the pinned GP checkout. Run these
+from the Top repository root with an interpreter that satisfies upstream's
+job prerequisites. The four command families preserve the GP argument and
+artifact contracts.
+
+```bash
+python -m proposed.validation.semcache_d5 lightperf --help
+python -m proposed.validation.semcache_d5 sweep --help
+python -m proposed.validation.semcache_d5 l6b --help
+python -m proposed.validation.semcache_d5 recovery --help
+```
+
+For real OPT runs, follow the GP runbooks and use their prepared artifacts
+and resource limits. The Qwen3 Slurm entry point and its 29G allocation are
+for Qwen3. L6-B requires a separate 64G allocation. D5 Lightperf still owns
+the ES–UD TCP transport, Partial QKV, L2C/L2E, and replay/recovery workflows.
