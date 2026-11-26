@@ -228,10 +228,10 @@ job prerequisites. The four command families preserve the GP argument and
 artifact contracts.
 
 ```bash
-python -m proposed.validation.semcache_d5 lightperf --help
-python -m proposed.validation.semcache_d5 sweep --help
-python -m proposed.validation.semcache_d5 l6b --help
-python -m proposed.validation.semcache_d5 recovery --help
+python -m proposed.validation.semcache_runner lightperf --help
+python -m proposed.validation.semcache_runner sweep --help
+python -m proposed.validation.semcache_runner l6b --help
+python -m proposed.validation.semcache_runner recovery --help
 ```
 
 For real OPT runs, follow the GP runbooks and use their prepared artifacts

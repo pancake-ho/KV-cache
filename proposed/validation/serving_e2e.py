@@ -172,7 +172,7 @@ def evaluate(settings, report, output):
 
     semcache_root = Path(settings["semcache_root"])
     if expected_git := settings.get("semcache_git"):
-        from .semcache_d5 import d5_git_state
+        from .semcache_runner import d5_git_state
 
         if d5_git_state(semcache_root) != expected_git:
             raise ValueError("SemCache source changed after resolving settings")

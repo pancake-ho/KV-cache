@@ -98,7 +98,7 @@ def artifacts_for(pair, result, old, cachebridge, profile):
 def resolve_settings(config):
     """Snapshot evaluator settings once inside the Slurm allocation."""
     from .semcache_smoke import git_state
-    from .semcache_d5 import CHECKOUT_ENV, d5_git_state
+    from .semcache_runner import CHECKOUT_ENV, d5_git_state
 
     root = config.REPO_ROOT
     path = Path(config.E2E_QA_REPORT or locate_qa(config.E2E_RESULTS, config.E2E_QA_JOB)).resolve()

@@ -13,7 +13,7 @@ from proposed.src.cache.semcache_policy import SemCachePrefixPolicy
 from proposed.src.kv_transfer.adapter_pair import AdapterPairKVTransfer
 from proposed.src.serving.engine import ServingEngine
 from proposed.src.serving.request import Request
-from proposed.validation import semcache_d5
+from proposed.validation import semcache_runner
 from proposed.validation.e2e_workload import Event
 from proposed.validation.serving_e2e import run_trace
 
@@ -166,9 +166,9 @@ class PrefixPolicyTests(unittest.TestCase):
 
     def test_d5_dispatch_preserves_checkout_and_upstream_arguments(self):
         root = Path.cwd()
-        with patch.object(semcache_d5, "d5_git_state") as state, \
-                patch.object(semcache_d5.subprocess, "call", return_value=7) as child:
-            result = semcache_d5.main(["--semcache-root", str(root), "l6b", "--help"])
+        with patch.object(semcache_runner, "d5_git_state") as state, \
+                patch.object(semcache_runner.subprocess, "call", return_value=7) as child:
+            result = semcache_runner.main(["--semcache-root", str(root), "l6b", "--help"])
         self.assertEqual(result, 7)
         state.assert_called_once_with(root)
         args, kwargs = child.call_args
