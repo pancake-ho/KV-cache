@@ -42,6 +42,18 @@ def locate_qa(results, job):
     return reports[0]
 
 
+def locate_e2e_fit(config, job):
+    """Find a fit report in the current or historical E2E output root."""
+    directory = config.E2E_OUTPUT_ROOT / f"e2e_{job}"
+    if (directory / REPORT).is_file():
+        return directory
+    historical = config.OUTPUT_ROOT / f"e2e_{job}"
+    if (historical / REPORT).is_file():
+        return historical
+    paths = ", ".join(str(path / REPORT) for path in dict.fromkeys((directory, historical)))
+    raise FileNotFoundError(f"E2E fit job {job} report is missing. Checked {paths}")
+
+
 def qa_inputs(path, pair):
     qa = read(path)
     result = qa.get("results", {}).get(pair, {})
@@ -166,7 +178,7 @@ def resolve_settings(config):
         job = str(config.E2E_CACHEBRIDGE_V2_FIT_JOB)
         if not job.isdecimal():
             raise ValueError("Set E2E_CACHEBRIDGE_V2_FIT_JOB to the completed fit job ID")
-        fit_dir = config.E2E_OUTPUT_ROOT / f"e2e_{job}"
+        fit_dir = locate_e2e_fit(config, job)
         fit = read(fit_dir / REPORT)
         artifact = fit_dir / "artifact"
         if (fit["status"] != "complete" or fit["settings"]["profile_name"] != "cachebridge_v2_fit"

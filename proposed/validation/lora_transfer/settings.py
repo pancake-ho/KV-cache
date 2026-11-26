@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from ..e2e_inputs import REPORT, artifact_manifest, read
+from ..e2e_inputs import REPORT, artifact_manifest, locate_e2e_fit, read
 from ...src.models.lora import adapter_fingerprint
 
 
@@ -44,7 +44,7 @@ def resolve_lora(config, settings):
     job = str(config.E2E_LORA_FIT_JOB)
     if not job.isdecimal():
         raise ValueError("Set E2E_LORA_FIT_JOB to the completed LoRA calibration job")
-    directory = config.E2E_OUTPUT_ROOT / f"e2e_{job}"
+    directory = locate_e2e_fit(config, job)
     fit = read(directory / REPORT)
     if (fit["status"] != "complete" or fit["settings"]["profile"]["lora_stage"] != "fit"
             or any(fit["settings"][key] != settings[key] for key in

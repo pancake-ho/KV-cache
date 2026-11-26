@@ -182,7 +182,9 @@ BF16 and free VRAM before model loading. The existing LoRA smoke has its own
 `sbatch run/seraph/qwen3_serving.sh` entry.
 
 The job writes `report-top-system-e2e.json` and `settings.json` under
-`E2E_OUTPUT_ROOT/e2e_<job_id>/`. It generates PDFs, PNGs and a CSV in
+`E2E_OUTPUT_ROOT/e2e_<job_id>/` (default `results/e2e/e2e_<job_id>/`).
+LoRA and CacheBridge v2 evaluation can also find existing fit jobs under
+`results/semcache/` via `OUTPUT_ROOT`. The job generates PDFs, PNGs and a CSV in
 `figures/` using Matplotlib 3.8 or newer. The same trace compares Full
 prefill, exact same-model reuse and the available fitted mappers. Ridge
 uses the existing `LinearKVMapper` with GPU-resident weights. CacheBridge

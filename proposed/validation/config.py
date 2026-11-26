@@ -72,12 +72,12 @@ OUTPUT_ROOT = REPO_ROOT / "results/semcache"
 # Base-model LongBench E2E. An input report is data from the completed mapper evaluation.
 E2E_DATA_ROOT = Path("/data") / getuser()
 E2E_RESULTS = E2E_DATA_ROOT / "kv_mapper_optim_runs"
-E2E_OUTPUT_ROOT = OUTPUT_ROOT
+E2E_OUTPUT_ROOT = REPO_ROOT / "results/e2e"
 E2E_PAIR = "1.7b-4b"
 E2E_QA_JOB = "222976"
 E2E_QA_REPORT = None  # Specify a path instead of resolving E2E_QA_JOB.
-E2E_PROFILE = "lora_cachebridge_v2_compare"
-E2E_SEMCACHE_ROOT = Path("/data/surt321/repos/lab/GP_semcache-r5-d38edf8")
+E2E_PROFILE = "semcache_policy_pilot"
+E2E_SEMCACHE_ROOT = Path("/data/surt321/repos/lab/GP_semcache-5f325c5")
 E2E_TINYBERT_DIR = Path("/data/surt321/models/semcache/tinybert-34707a3")
 E2E_HF_HUB_CACHE = Path("/data/surt321/hf_cache/hub")
 E2E_CACHEBRIDGE = {
