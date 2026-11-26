@@ -132,6 +132,19 @@ def summarize(replays, *, trace=None, cache_capacity_bytes=None):
     }
     if trace is not None:
         summary["reuse"] = summarize_reuse(replays, consumers, trace, cache_capacity_bytes)
+    if "cache_policy_metrics" in all_rows[0]:
+        policy_rows = [row["cache_policy_metrics"] for row in all_rows]
+        summary["cache_policy"] = {
+            "name": policy_rows[0]["policy"],
+            "admission_outcomes": dict(Counter(row["admission"] for row in policy_rows)),
+            "evictions": sum(row.get("evictions", 0) for row in policy_rows),
+            "evicted_bytes": sum(row.get("evicted_bytes", 0) for row in policy_rows),
+            "mean_ms_per_trace_request": {
+                name: mean(row.get(name, 0.0) for row in policy_rows)
+                for name in ("observation_ms", "admission_policy_ms", "eviction_selection_ms",
+                             "eviction_ms", "reuse_update_ms")
+            },
+        }
     return summary, rows
 
 

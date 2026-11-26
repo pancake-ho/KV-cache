@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 from zipfile import ZipFile
 
@@ -97,11 +98,12 @@ def artifacts_for(pair, result, old, cachebridge, profile):
 def resolve_settings(config):
     """Snapshot evaluator settings once inside the Slurm allocation."""
     from .semcache_smoke import git_state
+    from .semcache_d5 import CHECKOUT_ENV, d5_git_state
 
     root = config.REPO_ROOT
     path = Path(config.E2E_QA_REPORT or locate_qa(config.E2E_RESULTS, config.E2E_QA_JOB)).resolve()
     pair = config.E2E_PAIR
-    profile_name = config.E2E_PROFILE
+    profile_name = os.environ.get("KV_TOP_E2E_PROFILE", config.E2E_PROFILE)
     profile = config.E2E_PROFILES[profile_name]
     input_digest = sha(path)
     qa, result, old = qa_inputs(path, pair)
@@ -145,9 +147,13 @@ def resolve_settings(config):
             "cachebridge_v2_fit": {"initializer": str(initializer),
                                    "max_history": config.E2E_CACHEBRIDGE_V2_MAX_HISTORY},
         }
-    semcache = config.E2E_SEMCACHE_ROOT.resolve()
+    external_checkout = os.environ.get(CHECKOUT_ENV)
+    semcache = Path(external_checkout or config.E2E_SEMCACHE_ROOT).expanduser().resolve()
     if not (semcache / "src/semcache/edgelora/r5_semantic_index.py").is_file():
         raise FileNotFoundError(f"R5 semantic index missing in {semcache}; set E2E_SEMCACHE_ROOT")
+    semcache_git = None
+    if external_checkout or any("cache_policy" in case for case in profile["scenarios"]):
+        semcache_git = d5_git_state(semcache)
     if profile.get("lora_stage"):
         base = result["fit"]["artifact"]
         manifest = artifact_manifest("rarecache", base)
@@ -181,6 +187,7 @@ def resolve_settings(config):
         **common,
         "artifacts": artifacts, "artifact_manifest": manifests, "methods": methods,
         "semcache_root": str(semcache),
+        **({"semcache_git": semcache_git} if semcache_git is not None else {}),
         "tinybert_dir": str(config.E2E_TINYBERT_DIR) if config.E2E_TINYBERT_DIR else None,
         "hf_hub_cache": str(Path(hub_cache).expanduser().resolve()) if hub_cache else None,
         "repair_fraction": config.E2E_REPAIR_FRACTION,

@@ -34,6 +34,7 @@ class Lookup:
     semantic_encoding_ms: float
     cluster_assignment_ms: float
     candidate_lookup_ms: float
+    policy_observation_ms: float = 0.0
 
 
 def route_rejection(entry, request, adapter_sha256, transfer):
@@ -54,19 +55,25 @@ def route_rejection(entry, request, adapter_sha256, transfer):
 
 
 class PrefixCache:
-    """One process, exact zero-based prefixes and byte-bounded LRU."""
+    """One process, exact zero-based prefixes and byte-bounded KV ownership."""
 
-    def __init__(self, index, capacity_bytes: int, *, codec: KVBitpackCodec | None = None):
+    def __init__(self, index, capacity_bytes: int, *, codec: KVBitpackCodec | None = None, policy=None):
         if capacity_bytes < 1:
             raise ValueError("cache capacity must be positive")
         self.index = index
         self.capacity_bytes = capacity_bytes
         self.codec = codec
+        self.policy = policy
         self.entries: OrderedDict[str, Entry] = OrderedDict()
         self.bytes = 0
         self.evictions = 0
 
     def lookup(self, request: Request, *, adapter_sha256: str | None = None, transfer=None) -> Lookup:
+        observation_ms = 0.0
+        if self.policy is not None:
+            start = perf_counter()
+            self.policy.observe(request, adapter_sha256)
+            observation_ms = (perf_counter() - start) * 1000
         assignment = self.index.assign(request.text)
         start = perf_counter()
         candidates = self.index.discover(assignment["cluster_id"], request.token_ids)
@@ -89,15 +96,29 @@ class PrefixCache:
             rejected[reason] = rejected.get(reason, 0) + 1
         return Lookup(hit, assignment["cluster_id"], len(candidates), rejected,
                       assignment["semantic_encoding_ms"], assignment["cluster_assignment_ms"],
-                      (perf_counter() - start) * 1000)
+                      (perf_counter() - start) * 1000, observation_ms)
 
-    def snapshot(self, request: Request, layers: Layers, adapter_sha256: str | None = None) -> Entry | None:
+    def snapshot(self, request: Request, layers: Layers, adapter_sha256: str | None = None,
+                 *, metrics=None) -> Entry | None:
         if len(request.token_ids) < 3:
+            if metrics is not None:
+                metrics["admission"] = "short_prefix"
             return None
         size = (self.codec.encoded_size(layers) if self.codec is not None else
                 sum(t.numel() * t.element_size() for pair in layers for t in pair))
         if size > self.capacity_bytes:
+            if metrics is not None:
+                metrics["admission"] = "oversize"
             return None
+        if self.policy is not None:
+            start = perf_counter()
+            admitted = self.policy.admit(request, adapter_sha256, size, self.entries)
+            if metrics is not None:
+                metrics["admission_policy_ms"] = (perf_counter() - start) * 1000
+            if not admitted:
+                if metrics is not None:
+                    metrics["admission"] = "below_policy_threshold"
+                return None
         # Own an immutable prefill snapshot before the request's DynamicCache grows.
         if self.codec is None:
             owned = tuple((k.detach().clone(), v.detach().clone()) for k, v in layers)
@@ -110,7 +131,7 @@ class PrefixCache:
             return entry.layers
         return self.codec.decode(entry.layers)
 
-    def admit(self, entry: Entry, cluster_id: int) -> None:
+    def admit(self, entry: Entry, cluster_id: int, *, metrics=None) -> None:
         if not 0 < entry.size_bytes <= self.capacity_bytes:
             raise ValueError("invalid cache entry byte size")
         request = entry.request
@@ -119,11 +140,36 @@ class PrefixCache:
         key = request.request_id
         if key in self.entries:
             raise ValueError(f"duplicate cache entry: {key}")
-        while self.bytes + entry.size_bytes > self.capacity_bytes:
-            victim = next(iter(self.entries))
+        required = self.bytes + entry.size_bytes - self.capacity_bytes
+        victims = []
+        if required > 0:
+            start = perf_counter()
+            order = self.entries if self.policy is None else self.policy.eviction_order(self.entries, entry)
+            for victim in order:
+                if victim == key:
+                    if metrics is not None:
+                        metrics["admission"] = "insufficient_policy_priority"
+                        metrics["eviction_selection_ms"] = (perf_counter() - start) * 1000
+                    return
+                victims.append(victim)
+                required -= self.entries[victim].size_bytes
+                if required <= 0:
+                    break
+            if metrics is not None:
+                metrics["eviction_selection_ms"] = (perf_counter() - start) * 1000
+        start = perf_counter() if metrics is not None else None
+        evicted_bytes = 0
+        for victim in victims:
             self.index.invalidate(victim)
-            self.bytes -= self.entries.pop(victim).size_bytes
+            size = self.entries.pop(victim).size_bytes
+            self.bytes -= size
+            evicted_bytes += size
             self.evictions += 1
+            if self.policy is not None:
+                self.policy.remove(victim)
+        if metrics is not None:
+            metrics.update(evictions=len(victims), evicted_bytes=evicted_bytes,
+                           eviction_ms=(perf_counter() - start) * 1000 if victims else 0.0)
         self.index.add(key, {
             "entry_id": key,
             "source_request_id": key,
@@ -133,3 +179,7 @@ class PrefixCache:
         })
         self.entries[key] = entry
         self.bytes += entry.size_bytes
+        if self.policy is not None:
+            self.policy.insert(key)
+        if metrics is not None:
+            metrics["admission"] = "stored"

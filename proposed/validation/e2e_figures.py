@@ -46,6 +46,11 @@ def table(report):
                 "delta_f1_vs_full": delta.get("f1_points", {}).get("mean"),
                 "delta_f1_ci95_low": f1_ci[0], "delta_f1_ci95_high": f1_ci[1],
                 **(reuse_columns(case["scenario"], m) if "reuse" in m else {}),
+                **({"cache_policy": m["cache_policy"]["name"],
+                    "cache_policy_step": int(key == "semcache"),
+                    "delta_trace_wall_ms_vs_lru": median(result["paired_vs_lru"]["trace_wall_ms_by_replay"])
+                    if "paired_vs_lru" in result else None}
+                   if "cache_policy" in m else {}),
                 **({"elapsed_ms_per_target_qa": m["elapsed_ms_per_target_qa"],
                     "mapping_p50_ms": m["mapping_ms"]["p50"]}
                    if "elapsed_ms_per_target_qa" in m else {}),
@@ -194,6 +199,15 @@ def render(report_path, out):
         "axes.spines.top": False, "axes.spines.right": False, "axes.linewidth": .7,
         "axes.grid": True, "axes.axisbelow": True, "grid.color": "#e1e5e8", "grid.linewidth": .45,
     })
+    if "cache_policy" in rows[0]:
+        plot_sweep_panels(plt, rows, out / "semcache_policy", "cache_policy_step", "Cache policy", (
+            ("elapsed_per_target_qa_ms", "Total time per target QA (ms)"),
+            ("ttft_p50_ms", "Median TTFT (ms)"),
+            ("eligible_cross_hit_pct", "Eligible cross-model hit rate (%)"),
+            ("qa_f1", "QA F1 (%)"),
+        ), tick_labels=["LRU", "SemCache"])
+        print(f"Figures {out}", flush=True)
+        return
     if reuse_mode:
         plot_reuse(plt, rows, out, reuse_mode)
         print(f"Figures {out}", flush=True)
@@ -278,7 +292,7 @@ def plot_reuse(plt, rows, out, mode):
         plot_sweep_panels(plt, rows, out / name, x_key, x_label, metrics)
 
 
-def plot_sweep_panels(plt, rows, path, x_key, x_label, metrics):
+def plot_sweep_panels(plt, rows, path, x_key, x_label, metrics, *, tick_labels=None):
     ticks = sorted({row[x_key] for row in rows})
     methods = dict.fromkeys(row["method"] for row in rows)
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.45), layout="constrained", sharex=True)
@@ -291,6 +305,8 @@ def plot_sweep_panels(plt, rows, path, x_key, x_label, metrics):
             ax.plot(*zip(*values), label="Proposed" if method == "rarecache" else method_label,
                     color=color, marker=marker, linestyle=linestyle, linewidth=1.35, markersize=4)
         ax.set(ylabel=label, xticks=ticks)
+        if tick_labels is not None:
+            ax.set_xticks(ticks, tick_labels)
         ax.grid(axis="x", visible=False)
         if label.endswith("(%)"):
             ax.set_ylim(-4, 104)

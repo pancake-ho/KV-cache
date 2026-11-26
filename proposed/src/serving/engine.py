@@ -10,10 +10,11 @@ def elapsed_ms(start):
 
 
 class ServingEngine:
-    def __init__(self, runtime, *, cache=None, transfer=None):
+    def __init__(self, runtime, *, cache=None, transfer=None, collect_cache_metrics=False):
         self.runtime = runtime
         self.cache = cache
         self.transfer = transfer
+        self.collect_cache_metrics = collect_cache_metrics
 
     def serve(self, request: Request, budget: int):
         if budget < 1 or not request.token_ids:
@@ -31,6 +32,7 @@ class ServingEngine:
 
         routing_ms = elapsed_ms(started)
         lookup = None
+        cache_metrics = {} if self.collect_cache_metrics else None
         if cache is not None:
             lookup = cache.lookup(request, adapter_sha256=adapter_sha256, transfer=self.transfer)
         entry = lookup.entry if lookup is not None else None
@@ -82,6 +84,7 @@ class ServingEngine:
             tick = perf_counter()
             snapshot = cache.snapshot(
                 request, self.runtime.layers(model, prefill, len(request.token_ids)), adapter_sha256,
+                metrics=cache_metrics,
             )
             self.runtime.sync()
             snapshot_ms = elapsed_ms(tick)
@@ -95,9 +98,19 @@ class ServingEngine:
 
         tick = perf_counter()
         if snapshot is not None:
-            cache.admit(snapshot, lookup.cluster_id)
+            cache.admit(snapshot, lookup.cluster_id, metrics=cache_metrics)
         admission_ms = elapsed_ms(tick) if snapshot is not None else 0.0
         text = self.runtime.tokenizers[request.model_id].decode(generated, skip_special_tokens=True)
+        if entry is not None and cache.policy is not None:
+            tick = perf_counter()
+            cache.policy.reuse(entry)
+            if cache_metrics is not None:
+                cache_metrics["reuse_update_ms"] = elapsed_ms(tick)
+        if cache_metrics is not None:
+            cache_metrics["policy"] = ("disabled" if cache is None else
+                                       "lru" if cache.policy is None else cache.policy.name)
+            cache_metrics.setdefault("admission", "disabled" if cache is None else "hit")
+            cache_metrics["observation_ms"] = lookup.policy_observation_ms if lookup else 0.0
         return {
             "request_id": request.request_id, "user_id": request.user_id, "model_id": request.model_id,
             "adapter_id": request.adapter_id, "adapter_sha256": adapter_sha256,
@@ -116,6 +129,7 @@ class ServingEngine:
             "snapshot_ms": snapshot_ms, "admission_ms": admission_ms,
             "cache_encode_ms": snapshot_ms if compressed and snapshot is not None else 0.0,
             "cache_decode_ms": cache_decode_ms,
+            **({"cache_policy_metrics": cache_metrics} if cache_metrics is not None else {}),
             "application_ms": elapsed_ms(started),
             "resident_kv_bytes": cache.bytes if cache else 0,
         }

@@ -54,6 +54,8 @@ Do not recommend large refactors unless they are required to fix an actual probl
 - Extend the existing implementation first when its responsibilities and caller behavior are compatible.
 - Isolate experiment-specific behavior when combining it with existing code would mix incompatible contracts. Keep shared logic in its existing module.
 - Group experiment-specific modules under a clearly named directory and name each file for its responsibility. Reuse the existing configuration and entry point when they already fit.
+- Delete code made obsolete by a change after checking its callers. Do not keep backup copies in the repository.
+- Preserve other top-architecture paths and check their existing interfaces when changing SemCache or another shared module.
 
 ---
 
