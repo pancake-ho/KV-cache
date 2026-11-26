@@ -222,6 +222,37 @@ bytes, and policy timings. Policy timing fields are nested inside existing
 snapshot, admission and request timings. Include producer requests when
 reading the whole-trace values. Existing profiles still select LRU.
 
+## Evaluate LoRA transfer across datasets
+
+Use `lora_generalization_pilot` for a first run and `lora_generalization`
+for 16 frozen QA rows per available non-QASPER LongBench dataset and 12
+QASPER test papers with four questions each. The pilot uses up to four
+LongBench QA rows per dataset and four QASPER papers. The report lists the
+selected dataset names, rows and LoRA routes. LongBench subsets stay in the
+frozen QA cohort, and the QASPER loader excludes mapper calibration overlap.
+CacheBridge v2 readout fitting continues to use the existing LongBench
+calibration split.
+
+The experiment uses existing Qwen3-1.7B and Qwen3-4B LoRA checkpoints and
+the completed `lora_transfer_fit` job configured in `E2E_LORA_FIT_JOB`.
+It compares full, exact, the base RaReCache mapper, LoRA-fitted RaReCache
+and LoRA-fitted CacheBridge v2. Each dataset and adapter route gets its own
+replay with a 1024 MiB raw LRU cache. A producer is followed by its
+consumer questions. Each mapper must hit on all offered cross-model QA
+requests. The exact baseline recomputes these cross-model QA requests.
+
+```bash
+export KV_TOP_SEMCACHE_ROOT=/absolute/path/to/GP_semcache
+export KV_TOP_E2E_PROFILE=lora_generalization_pilot
+mkdir -p logs
+sbatch run/seraph/qwen3_serving_e2e.sh
+```
+
+Read the dataset and adapter-specific F1, EM, TTFT, whole-trace elapsed time,
+and GPU peaks in `results/e2e/e2e_<job_id>/report-top-system-e2e.json`.
+The pilot is a path-coverage check with an eight-token budget. The larger
+profile uses 64 generated tokens and two measured replays per case.
+
 ## Run the D5 OPT backend
 
 The Top checkout delegates D5 commands to the pinned GP checkout. Run these

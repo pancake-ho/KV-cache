@@ -2,9 +2,33 @@
 
 from dataclasses import replace
 from pathlib import Path
+from random import Random
 
-from ..e2e_inputs import artifact_manifest
+from ..e2e_inputs import QASPER_DATASET, artifact_manifest, frozen_prompts
 from ...src.kv_transfer.adapter_pair import AdapterPairKVTransfer
+
+
+def generalization_cohort(settings, reference, template, tokenizers):
+    """Use frozen holdout rows and the separately verified QASPER test archive."""
+    from ..reuse_experiment.qasper_cohort import load_reuse_cohort
+
+    profile = settings["profile"]
+    rng = Random(settings["seed"])
+    longbench = []
+    for dataset in settings["evaluation_datasets"]:
+        if dataset == QASPER_DATASET:
+            continue
+        candidates = [row for row in reference["cohort"] if row["dataset"] == dataset]
+        if not candidates:
+            raise ValueError(f"No frozen LongBench holdout rows for {dataset}")
+        rng.shuffle(candidates)
+        longbench.extend(candidates[:profile["longbench_documents_per_dataset"]])
+    prompts = frozen_prompts(reference["dataset"], longbench, template, tokenizers)
+    qasper, qasper_prompts = load_reuse_cohort(
+        settings["reuse_dataset"], reference, {**profile, "documents": profile["qasper_documents"]},
+        template, tokenizers, settings["seed"],
+    )
+    return [*longbench, *qasper], [*prompts, *qasper_prompts]
 
 
 def activate_adapters(runtime, identities, routes):

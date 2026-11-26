@@ -10,7 +10,7 @@ import sys
 
 from . import config
 from .e2e_inputs import (
-    REPORT, ROLES, artifact_manifest, frozen_prompts, qa_inputs, resolve_settings, sha, write,
+    QASPER_DATASET, REPORT, ROLES, artifact_manifest, frozen_prompts, qa_inputs, resolve_settings, sha, write,
 )
 from .e2e_workload import documents, make_trace, paired_deltas, route_check, score_answer, summarize
 from .semcache_smoke import TINYBERT_REVISION, git_state
@@ -148,7 +148,11 @@ def models_and_prompts(settings, qa, old, device, *, load_runtime=True):
     if template_revision != revision:
         raise ValueError("Pinned reference Qwen tokenizer revision differs from the QA template")
     template = AutoTokenizer.from_pretrained(template_path, local_files_only=True)
-    if reuse_dataset := settings.get("reuse_dataset"):
+    if settings.get("evaluation_datasets") and load_runtime:
+        from .lora_transfer.replay import generalization_cohort
+
+        cohort, prompts = generalization_cohort(settings, old, template, tokenizers)
+    elif (reuse_dataset := settings.get("reuse_dataset")) and not settings.get("evaluation_datasets"):
         from .reuse_experiment.qasper_cohort import load_reuse_cohort
 
         cohort, prompts = load_reuse_cohort(
@@ -278,14 +282,20 @@ def evaluate(settings, report, output):
         name = case["id"]
         report["results"][name] = {"scenario": case, "methods": {}}
         tokenizer = runtime.tokenizers[pair[1]]
-        if reuse:
+        dataset = case.get("eval_dataset")
+        case_selected = selected if dataset is None else [
+            item for item in selected if item[0]["dataset"] == dataset
+        ]
+        reuse_trace = reuse and dataset in {None, QASPER_DATASET}
+        if reuse_trace:
             from .reuse_experiment.request_schedule import make_reuse_trace
 
-            trace = make_reuse_trace(selected, tokenizer, pair, case, profile, settings["seed"])
+            trace_profile = profile if dataset is None else {**profile, "reuse_experiment": "amortization"}
+            trace = make_reuse_trace(case_selected, tokenizer, pair, case, trace_profile, settings["seed"])
         else:
-            trace = make_trace(selected, tokenizer, pair, case, profile["window"], settings["seed"])
+            trace = make_trace(case_selected, tokenizer, pair, case, profile["window"], settings["seed"])
         if lora_stage:
-            trace = assign_adapters(trace, settings["lora_routes"][name])
+            trace = assign_adapters(trace, settings["lora_routes"][case.get("lora_route", name)])
         warm_ids = set()
         for kind in ("same", "cross", "cold"):
             candidates = [event for event in trace if event.kind == kind]
@@ -298,7 +308,7 @@ def evaluate(settings, report, output):
             from ..src.cache.kv_bitpack import KVBitpackCodec
 
             codec = KVBitpackCodec()
-        traces[name] = trace, warm_trace, codec
+        traces[name] = trace, warm_trace, codec, reuse_trace
 
     def make_index():
         return SemanticIndex(encoder, clusters=1)
@@ -312,11 +322,12 @@ def evaluate(settings, report, output):
                 name = case["id"]
                 print(f"{name}: {method}", flush=True)
                 if lora_stage:
+                    route_name = case.get("lora_route", name)
                     transfer, metadata = transfer_for(
-                        method, settings, name, identities, snapshots, device,
-                        cachebridge_fit=report.get("cachebridge_v2_lora_fits", {}).get(name),
+                        method, settings, route_name, identities, snapshots, device,
+                        cachebridge_fit=report.get("cachebridge_v2_lora_fits", {}).get(route_name),
                     )
-                trace, warm_trace, codec = traces[name]
+                trace, warm_trace, codec, reuse_trace = traces[name]
 
                 def replay(events, budget):
                     return run_trace(runtime, method, transfer, make_index, events, case, budget, codec)
@@ -337,7 +348,7 @@ def evaluate(settings, report, output):
                         "mapper_allocated_bytes": latency["start_gpu_allocated_bytes"] - base_bytes,
                     })
                 summary, per_doc = summarize(
-                    replays, trace=trace if reuse else None, cache_capacity_bytes=case["cache_mib"] << 20,
+                    replays, trace=trace if reuse_trace else None, cache_capacity_bytes=case["cache_mib"] << 20,
                 )
                 if settings["profile_name"] in {"pilot", "reuse_pilot"}:
                     pilot_check(per_doc, method)

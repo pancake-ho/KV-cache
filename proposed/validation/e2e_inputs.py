@@ -9,6 +9,7 @@ from zipfile import ZipFile
 
 REPORT = "report-top-system-e2e.json"
 PAIR_REPORT = "report-longbench-qa-pairs.json"
+QASPER_DATASET = "qasper_v03_test"
 ROLES = ("source", "target")
 LEGACY = {"ridge": "legacy_ridge_cached", "mlp": "legacy_mlp"}
 
@@ -122,7 +123,18 @@ def resolve_settings(config):
     if sha(path) != input_digest:
         raise ValueError("Completed QA report changed while reading it")
     reuse = None
-    if profile.get("reuse_experiment"):
+    evaluation_datasets = None
+    if "longbench_documents_per_dataset" in profile:
+        longbench = sorted({item["dataset"] for item in old["cohort"]
+                            if not item["dataset"].lower().startswith("qasper")})
+        if not longbench:
+            raise ValueError("LoRA generalization requires a frozen non-QASPER LongBench dataset")
+        if any(not name.replace("_", "").replace("-", "").isalnum() for name in longbench):
+            raise ValueError("Invalid frozen LongBench dataset name")
+        if profile["longbench_documents_per_dataset"] < 1 or profile["qasper_documents"] < 1:
+            raise ValueError("LoRA generalization requires positive cohort sizes")
+        evaluation_datasets = [*longbench, QASPER_DATASET]
+    if profile.get("reuse_experiment") or evaluation_datasets:
         dataset = Path(config.E2E_REUSE_DATASET).expanduser().resolve()
         if not dataset.is_file():
             raise FileNotFoundError(f"Place the QASPER test archive at {dataset}")
@@ -164,7 +176,7 @@ def resolve_settings(config):
     if not (semcache / "src/semcache/edgelora/r5_semantic_index.py").is_file():
         raise FileNotFoundError(f"R5 semantic index missing in {semcache}; set E2E_SEMCACHE_ROOT")
     semcache_git = None
-    if external_checkout or any("cache_policy" in case for case in profile["scenarios"]):
+    if external_checkout or evaluation_datasets or any("cache_policy" in case for case in profile["scenarios"]):
         semcache_git = d5_git_state(semcache)
     if profile.get("lora_stage"):
         base = result["fit"]["artifact"]
@@ -196,6 +208,7 @@ def resolve_settings(config):
     hub_cache = getattr(config, "E2E_HF_HUB_CACHE", None)
     settings = {
         **({"reuse_dataset": reuse} if reuse is not None else {}),
+        **({"evaluation_datasets": evaluation_datasets} if evaluation_datasets else {}),
         **common,
         "artifacts": artifacts, "artifact_manifest": manifests, "methods": methods,
         "semcache_root": str(semcache),

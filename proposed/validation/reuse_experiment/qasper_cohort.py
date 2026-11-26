@@ -7,7 +7,7 @@ import tarfile
 from random import Random
 
 from ...src.exp.mapper_optim.inputs import token_hash
-from ..e2e_inputs import check_tokenizers, longbench_rows, render_qa_prompt, sha
+from ..e2e_inputs import QASPER_DATASET, check_tokenizers, longbench_rows, render_qa_prompt, sha
 
 
 def words(text):
@@ -120,8 +120,8 @@ def load_reuse_cohort(dataset, reference, profile, template, tokenizers, seed):
         digest = hashlib.sha256(context.encode()).hexdigest()
         for (question_id, _, answers), (ids, offset) in zip(questions, selected, strict=True):
             cohort.append({
-                "dataset": "qasper_v03_test", "paper_id": paper_id, "question_id": question_id,
-                "group": "qasper_v03_test", "document_sha256": digest, "token_sha256": token_hash(ids),
+                "dataset": QASPER_DATASET, "paper_id": paper_id, "question_id": question_id,
+                "group": QASPER_DATASET, "document_sha256": digest, "token_sha256": token_hash(ids),
                 "prompt_tokens": len(ids), "source_prefix_tokens": offset, "answers": answers,
             })
         prompts.extend(selected)

@@ -175,3 +175,19 @@ E2E_PROFILES["semcache_policy_pressure"] = {
 E2E_PROFILES["semcache_policy_pilot"] = {
     **E2E_PROFILES["semcache_policy_pressure"], "documents": 4, "repeats": 1, "new_tokens": 8,
 }
+
+# Paired LoRA evaluation on the frozen LongBench cohort and separate QASPER test data.
+E2E_LORA_GENERALIZATION = {
+    **E2E_LORA_BASE,
+    "lora_stage": "evaluate",
+    "lora_cachebridge_v2_history": E2E_CACHEBRIDGE_V2_MAX_HISTORY,
+    "longbench_documents_per_dataset": 16,
+    "qasper_documents": 12,
+    "questions_per_document": E2E_REUSE_BASE["questions_per_document"],
+    "prefix_tokens": E2E_REUSE_BASE["prefix_tokens"],
+}
+E2E_PROFILES["lora_generalization"] = E2E_LORA_GENERALIZATION
+E2E_PROFILES["lora_generalization_pilot"] = {
+    **E2E_LORA_GENERALIZATION, "longbench_documents_per_dataset": 4,
+    "qasper_documents": 4, "repeats": 1, "new_tokens": 8,
+}

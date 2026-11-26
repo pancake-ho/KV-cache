@@ -43,6 +43,9 @@ def table(report):
                 "peak_reserved_gib": m["peak_reserved_bytes"] / GIB,
                 "peak_resident_kv_gib": m["peak_resident_kv_bytes"] / GIB,
                 "qa_f1": 100 * m["qa_f1"], "qa_em": 100 * m["qa_em"],
+                **({"evaluation_dataset": case["scenario"]["eval_dataset"],
+                    "lora_target_adapter": case["scenario"]["lora_route"]}
+                   if "eval_dataset" in case["scenario"] else {}),
                 "delta_f1_vs_full": delta.get("f1_points", {}).get("mean"),
                 "delta_f1_ci95_low": f1_ci[0], "delta_f1_ci95_high": f1_ci[1],
                 **(reuse_columns(case["scenario"], m) if "reuse" in m else {}),
@@ -186,7 +189,7 @@ def render(report_path, out):
     reuse_mode = report["settings"]["profile"].get("reuse_experiment")
     csv_name = "reuse_metrics.csv" if reuse_mode else "metrics.csv"
     with (out / csv_name).open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(file, fieldnames=list(dict.fromkeys(key for row in rows for key in row)))
         writer.writeheader()
         writer.writerows(rows)
 
@@ -213,6 +216,14 @@ def render(report_path, out):
         print(f"Figures {out}", flush=True)
         return
     info = report["settings"]
+    if datasets := info.get("evaluation_datasets"):
+        for dataset in datasets:
+            subset = [{**row, "scenario": row["lora_target_adapter"]} for row in rows
+                      if row["evaluation_dataset"] == dataset]
+            plot_lora_routes(plt, subset, info["lora_routes"], out / f"lora_generalization_{dataset}",
+                             mean_ttft=True)
+        print(f"Figures {out}", flush=True)
+        return
     if info["profile"].get("lora_stage") == "evaluate":
         compare_v2 = bool(info["profile"].get("lora_cachebridge_v2_history"))
         name = "lora_cachebridge_v2_comparison" if compare_v2 else "lora_transfer_comparison"

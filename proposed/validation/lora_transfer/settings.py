@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from ..e2e_inputs import REPORT, artifact_manifest, locate_e2e_fit, read
+from ..e2e_inputs import QASPER_DATASET, REPORT, artifact_manifest, locate_e2e_fit, read
 from ...src.models.lora import adapter_fingerprint
 
 
@@ -34,9 +34,18 @@ def resolve_lora(config, settings):
         target_id: {"source": source, "target": endpoint(config, settings["models"]["target"], target_id)}
         for target_id in target_ids
     }
-    profile = {**settings["profile"], "scenarios": [
-        {**settings["profile"]["scenarios"][0], "id": name} for name in routes
-    ]}
+    profile = settings["profile"]
+    case = profile["scenarios"][0]
+    datasets = settings.get("evaluation_datasets")
+    if datasets:
+        scenarios = [
+            {**case, "id": f"{route}__{dataset}", "lora_route": route, "eval_dataset": dataset,
+             **({"reuse_count": profile["questions_per_document"]} if dataset == QASPER_DATASET else {})}
+            for route in routes for dataset in datasets
+        ]
+    else:
+        scenarios = [{**case, "id": name} for name in routes]
+    profile = {**profile, "scenarios": scenarios}
     settings.update(profile=profile, lora_routes=routes, methods=["full", "exact", "lora_base", "lora_fitted"])
     if profile["lora_stage"] == "fit":
         return settings
