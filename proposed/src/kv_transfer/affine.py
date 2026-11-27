@@ -39,7 +39,10 @@ class AffineKVMapper:
         self.repair_fraction = repair_fraction if method == "rarecache" else 0
 
     @torch.inference_mode()
-    def map_prefix(self, layers, prefix_ids, *, source_model, target_model, stage_events=None):
+    def map_prefix(self, layers, prefix_ids, *, source_model, target_model, stage_events=None,
+                   transfer_prefix=None):
+        if transfer_prefix is not None and (not self.repair_fraction or stage_events is not None):
+            raise ValueError("Prefix transfer requires separate RaReCache repair timing")
         if stage_events is not None:
             stream = torch.cuda.current_stream(layers[0][0].device)
             start, projected, repaired = (torch.cuda.Event(enable_timing=True) for _ in range(3))
@@ -51,6 +54,8 @@ class AffineKVMapper:
             projected.record(stream)
         if self.repair_fraction:
             positions = select_positions(scores, self.repair_fraction)
+            if transfer_prefix is not None:
+                mapped, positions = transfer_prefix(mapped, positions)
             prefix = torch.tensor([prefix_ids], dtype=torch.long, device=positions.device)
             mapped = recompute(target_model, mapped, prefix, positions)
         if stage_events is not None:
