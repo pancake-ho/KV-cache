@@ -22,10 +22,11 @@ class AdapterPairKVTransfer:
         return ((source.model_id, source.adapter_id, source_sha256) == self.source
                 and (target.model_id, target.adapter_id, target_sha256) == self.target)
 
-    def map_cache(self, layers, *, source, target, source_model, target_model):
+    def map_cache(self, layers, *, source, target, source_model, target_model, stage_events=None):
         if ((source.model_id, source.adapter_id) != self.source[:2]
                 or (target.model_id, target.adapter_id) != self.target[:2]):
             raise ValueError("Request differs from the registered LoRA route")
         return self.mapper.map_prefix(
             layers, source.token_ids, source_model=source_model, target_model=target_model,
+            **({"stage_events": stage_events} if stage_events is not None else {}),
         )

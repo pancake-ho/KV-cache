@@ -60,6 +60,10 @@ def transfer_for(method, settings, route_name, identities, snapshots, device, *,
 
     if method in {"full", "exact"}:
         return None, None
+    repair_fraction = settings["repair_fraction"]
+    if variant := settings.get("lora_repair_variants", {}).get(method):
+        method = variant["method"]
+        repair_fraction = variant["repair_percent"] / 100
     route = settings["lora_routes"][route_name]
     route_pair = {role: route[role] for role in ("source", "target")}
     mapper_method = "rarecache"
@@ -78,7 +82,7 @@ def transfer_for(method, settings, route_name, identities, snapshots, device, *,
     if artifact_manifest(mapper_method, path) != manifest:
         raise ValueError(f"{method} mapper checkpoint differs from the fitted artifact")
     mapper = AffineKVMapper(path, mapper_method, identities, snapshots, device,
-                            repair_fraction=settings["repair_fraction"])
+                            repair_fraction=repair_fraction)
     expected_route = None if method == "lora_base" else route_pair
     if mapper.metadata.get("lora_route") != expected_route:
         raise ValueError("Mapper was calibrated for a different adapter route")

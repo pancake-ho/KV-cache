@@ -67,5 +67,18 @@ def resolve_lora(config, settings):
         route.update(artifact=str(artifact), manifest=result["manifest"])
     if profile.get("lora_cachebridge_v2_history"):
         settings["methods"].append("lora_cachebridge_v2")
+    if "lora_repair_percentages" in profile:
+        percentages = profile["lora_repair_percentages"]
+        if (not percentages
+                or any(type(percent) is not int or not 1 <= percent <= 100 for percent in percentages)
+                or len(set(percentages)) != len(percentages)):
+            raise ValueError("LoRA repair sweep requires distinct integer percentages in [1, 100]")
+        variants = {
+            f"{method}_repair_{percent}": {"method": method, "repair_percent": percent}
+            for percent in sorted(percentages) for method in ("lora_base", "lora_fitted")
+        }
+        settings["lora_repair_variants"] = variants
+        settings["methods"] = [method for method in settings["methods"]
+                               if method not in {"lora_base", "lora_fitted"}] + list(variants)
     settings["lora_fit_job"] = job
     return settings

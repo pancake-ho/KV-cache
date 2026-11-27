@@ -104,6 +104,13 @@ def summarize(replays, *, trace=None, cache_capacity_bytes=None):
         **({"paper_id": values[0]["paper_id"]} if "paper_id" in values[0] else {}),
         **{name: median(row[name] for row in values) for name in metrics},
     } for key, values in consumers.items()]
+    for row in rows:
+        samples = [item["mapping_stages_cuda_ms"] for item in consumers[row["request_id"]]
+                   if "mapping_stages_cuda_ms" in item]
+        if len(samples) == len(consumers[row["request_id"]]):
+            row["mapping_stages_cuda_ms"] = {
+                name: median(sample[name] for sample in samples) for name in samples[0]
+            }
     hits = {"native_kv_hit", "cross_model_kv_hit"}
     all_rows = [row for replay in replays for row in replay["requests"]]
     consumer_rows = [row for row in all_rows if row["kind"] != "producer"]
@@ -130,6 +137,11 @@ def summarize(replays, *, trace=None, cache_capacity_bytes=None):
                "qa_f1": mean(row["f1"] for row in rows if row["kind"] == kind)}
         for kind in kind_counts
     }
+    stages = [row["mapping_stages_cuda_ms"] for row in rows if "mapping_stages_cuda_ms" in row]
+    if stages:
+        summary["mapping_stages_cuda_ms"] = {
+            name: distribution([stage[name] for stage in stages]) for name in stages[0]
+        }
     if trace is not None:
         summary["reuse"] = summarize_reuse(replays, consumers, trace, cache_capacity_bytes)
     if "cache_policy_metrics" in all_rows[0]:

@@ -10,11 +10,13 @@ def elapsed_ms(start):
 
 
 class ServingEngine:
-    def __init__(self, runtime, *, cache=None, transfer=None, collect_cache_metrics=False):
+    def __init__(self, runtime, *, cache=None, transfer=None, collect_cache_metrics=False,
+                 collect_mapping_metrics=False):
         self.runtime = runtime
         self.cache = cache
         self.transfer = transfer
         self.collect_cache_metrics = collect_cache_metrics
+        self.collect_mapping_metrics = collect_mapping_metrics
 
     def serve(self, request: Request, budget: int):
         if budget < 1 or not request.token_ids:
@@ -39,6 +41,7 @@ class ServingEngine:
         prefix = 0
         past = None
         map_ms = 0.0
+        mapping_stages = {}
         cache_copy_ms = 0.0
         cache_decode_ms = 0.0
         path = "full_recompute" if cache is None else "miss_recompute"
@@ -56,9 +59,11 @@ class ServingEngine:
                 past = self.runtime.copy_cache(layers, clone=not compressed)
                 path = "native_kv_hit"
             else:
+                stage_events = {} if self.collect_mapping_metrics else None
                 past = self.transfer.map_cache(
                     layers, source=entry.request, target=request,
                     source_model=self.runtime.models[entry.request.model_id], target_model=model,
+                    **({"stage_events": stage_events} if stage_events is not None else {}),
                 )
                 path = "cross_model_kv_hit"
             del layers
@@ -66,6 +71,9 @@ class ServingEngine:
             self.runtime.sync()
             if path == "cross_model_kv_hit":
                 map_ms = elapsed_ms(tick)
+                if stage_events:
+                    mapping_stages = {name: start.elapsed_time(end)
+                                      for name, (start, end) in stage_events.items()}
             else:
                 cache_copy_ms = elapsed_ms(tick)
 
@@ -125,6 +133,7 @@ class ServingEngine:
             "candidate_lookup_ms": lookup.candidate_lookup_ms if lookup else 0.0,
             "model_routing_ms": routing_ms,
             "mapping_ms": map_ms, "same_model_copy_ms": cache_copy_ms,
+            **({"mapping_stages_cuda_ms": mapping_stages} if mapping_stages else {}),
             "prefill_ms": prefill_ms, "ttft_ms": ttft_ms, "decode_ms": decode_ms,
             "snapshot_ms": snapshot_ms, "admission_ms": admission_ms,
             "cache_encode_ms": snapshot_ms if compressed and snapshot is not None else 0.0,

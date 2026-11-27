@@ -54,7 +54,8 @@ def load_transfer(method, settings, identities, snapshots, target, device):
     yield BaseModelKVTransfer(mapper), {"storage": storage}
 
 
-def run_trace(runtime, method, transfer, make_index, trace, case, budget, codec):
+def run_trace(runtime, method, transfer, make_index, trace, case, budget, codec, *,
+              collect_mapping_metrics=False):
     policy_name = case.get("cache_policy", "lru")
     policy = None
     if policy_name != "lru" and method != "full":
@@ -66,7 +67,8 @@ def run_trace(runtime, method, transfer, make_index, trace, case, budget, codec)
     cache = None if method == "full" else PrefixCache(
         make_index(), case["cache_mib"] << 20, codec=codec, policy=policy)
     engine = ServingEngine(runtime, cache=cache, transfer=transfer,
-                           collect_cache_metrics="cache_policy" in case)
+                           collect_cache_metrics="cache_policy" in case,
+                           collect_mapping_metrics=collect_mapping_metrics)
     rows = []
     for event in trace:
         if "reuse_count" in case:
@@ -274,6 +276,12 @@ def evaluate(settings, report, output):
     )
     if reuse or lora_stage:
         report["measurement_scope"] += "; elapsed per target QA includes all producer requests"
+    repair_variants = settings.get("lora_repair_variants", {})
+    if repair_variants:
+        report["measurement_scope"] += (
+            "; RaReCache stage intervals use CUDA events on the active stream; "
+            "mapping_ms is synchronized host wall time including mapped-cache validation"
+        )
     report["semantic_encoder"] = encoder.metadata
     base_bytes = torch.cuda.memory_allocated(device)
 
@@ -330,7 +338,8 @@ def evaluate(settings, report, output):
                 trace, warm_trace, codec, reuse_trace = traces[name]
 
                 def replay(events, budget):
-                    return run_trace(runtime, method, transfer, make_index, events, case, budget, codec)
+                    return run_trace(runtime, method, transfer, make_index, events, case, budget, codec,
+                                     collect_mapping_metrics=method in repair_variants)
 
                 samples = measure_replays(
                     lambda: replay(trace, profile["new_tokens"]), device=device, repeats=profile["repeats"],
@@ -355,6 +364,9 @@ def evaluate(settings, report, output):
                 if lora_stage:
                     verify_routes((row for replay in replays for row in replay["requests"]
                                    if row["kind"] != "producer"), method)
+                    if method in repair_variants and any(
+                            "mapping_stages_cuda_ms" not in row for row in per_doc):
+                        raise RuntimeError(f"{method} is missing mapping stage measurements")
                     summary["elapsed_ms_per_target_qa"] = median(
                         1000 * replay["wall_seconds"] / len(per_doc) for replay in replays)
                 methods = report["results"][name]["methods"]

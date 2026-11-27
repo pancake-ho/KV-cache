@@ -24,11 +24,14 @@ STYLE = {
 
 def table(report):
     lora_comparison = bool(report["settings"]["profile"].get("lora_cachebridge_v2_history"))
+    variants = report["settings"].get("lora_repair_variants", {})
     for key, case in report["results"].items():
         for method, result in case["methods"].items():
             m = result["summary"]
             delta = result.get("paired_vs_full", {})
             f1_ci = delta.get("f1_points", {}).get("document_bootstrap_ci95", [None, None])
+            variant = variants.get(method)
+            stages = m.get("mapping_stages_cuda_ms", {})
             yield {
                 "pair": report["settings"]["pair"], "scenario": key, "method": method,
                 "codec": case["scenario"]["codec"], "cache_budget_mib": case["scenario"]["cache_mib"],
@@ -61,6 +64,10 @@ def table(report):
                     row["ttft_ms"] for replay in result["replays"] for row in replay["requests"]
                     if row["kind"] != "producer")}
                    if lora_comparison else {}),
+                **({"repair_percent": variant["repair_percent"], "rarecache_mapper": variant["method"],
+                    "kv_projection_and_scoring_cuda_p50_ms": stages["projection_and_scoring"]["p50"],
+                    "selective_repair_cuda_p50_ms": stages["selective_repair"]["p50"]}
+                   if variant else {}),
             }
 
 
@@ -217,11 +224,18 @@ def render(report_path, out):
         return
     info = report["settings"]
     if datasets := info.get("evaluation_datasets"):
+        variants = info.get("lora_repair_variants", {})
+        styles = STYLE.copy()
+        for index, (method, variant) in enumerate(variants.items()):
+            name, color, _, line = STYLE[variant["method"]]
+            marker = ("o", "^", "D", "v", "P", "s")[(index // 2) % 6]
+            styles[method] = (f"{name}, {variant['repair_percent']}%", color, marker, line)
         for dataset in datasets:
             subset = [{**row, "scenario": row["lora_target_adapter"]} for row in rows
                       if row["evaluation_dataset"] == dataset]
-            plot_lora_routes(plt, subset, info["lora_routes"], out / f"lora_generalization_{dataset}",
-                             mean_ttft=True)
+            name = "lora_repair_sweep" if variants else "lora_generalization"
+            plot_lora_routes(plt, subset, info["lora_routes"], out / f"{name}_{dataset}",
+                             mean_ttft=True, styles=styles)
         print(f"Figures {out}", flush=True)
         return
     if info["profile"].get("lora_stage") == "evaluate":
@@ -253,7 +267,7 @@ def render(report_path, out):
     print(f"Figures {out}", flush=True)
 
 
-def plot_lora_routes(plt, rows, routes, path, *, mean_ttft=False):
+def plot_lora_routes(plt, rows, routes, path, *, mean_ttft=False, styles=STYLE):
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.45), layout="constrained", sharex=True)
     panels = (
         ("ttft_mean_ms", "Mean TTFT (ms)") if mean_ttft else ("ttft_p50_ms", "Median TTFT (ms)"),
@@ -262,12 +276,13 @@ def plot_lora_routes(plt, rows, routes, path, *, mean_ttft=False):
         ("qa_f1", "QA F1 (%)"),
     )
     methods = list(dict.fromkeys(row["method"] for row in rows))
+    spacing = min(.13, .72 / max(len(methods) - 1, 1))
     values = {(row["scenario"], row["method"]): row for row in rows}
     positions = range(len(routes))
     for ax, (key, label) in zip(axes.flat, panels, strict=True):
         for i, method in enumerate(methods):
-            name, color, marker, _ = STYLE[method]
-            offset = .13 * (i - (len(methods) - 1) / 2)
+            name, color, marker, _ = styles[method]
+            offset = spacing * (i - (len(methods) - 1) / 2)
             ax.scatter([x + offset for x in positions], [values[route, method][key] for route in routes],
                        color=color, marker=marker, label=name, s=24)
         ax.set_ylabel(label)
@@ -276,7 +291,11 @@ def plot_lora_routes(plt, rows, routes, path, *, mean_ttft=False):
     for ax in axes[-1]:
         ax.set_xticks(list(positions), [route["target"]["dataset"] for route in routes.values()])
         ax.set_xlabel("Target LoRA training dataset")
-    axes[0, 0].legend(loc="lower right", fontsize=7, framealpha=.93)
+    if len(methods) > 5:
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="outside lower center", ncol=3, fontsize=7, frameon=False)
+    else:
+        axes[0, 0].legend(loc="lower right", fontsize=7, framealpha=.93)
     save(plt, fig, path)
 
 

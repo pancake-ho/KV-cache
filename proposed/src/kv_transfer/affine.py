@@ -39,12 +39,22 @@ class AffineKVMapper:
         self.repair_fraction = repair_fraction if method == "rarecache" else 0
 
     @torch.inference_mode()
-    def map_prefix(self, layers, prefix_ids, *, source_model, target_model):
+    def map_prefix(self, layers, prefix_ids, *, source_model, target_model, stage_events=None):
+        if stage_events is not None:
+            stream = torch.cuda.current_stream(layers[0][0].device)
+            start, projected, repaired = (torch.cuda.Event(enable_timing=True) for _ in range(3))
+            start.record(stream)
         cache = DynamicCache.from_legacy_cache(layers)
         mapped, scores = self.mapper.map(source_model, target_model, cache,
                                          collect_scores=bool(self.repair_fraction))
+        if stage_events is not None:
+            projected.record(stream)
         if self.repair_fraction:
             positions = select_positions(scores, self.repair_fraction)
             prefix = torch.tensor([prefix_ids], dtype=torch.long, device=positions.device)
             mapped = recompute(target_model, mapped, prefix, positions)
+        if stage_events is not None:
+            repaired.record(stream)
+            stage_events.update(projection_and_scoring=(start, projected),
+                                selective_repair=(projected, repaired))
         return mapped

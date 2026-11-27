@@ -191,3 +191,13 @@ E2E_PROFILES["lora_generalization_pilot"] = {
     **E2E_LORA_GENERALIZATION, "longbench_documents_per_dataset": 4,
     "qasper_documents": 4, "repeats": 1, "new_tokens": 8,
 }
+
+E2E_LORA_REPAIR_PERCENTAGES = (10, 25, 50)
+E2E_PROFILES["lora_repair_sweep"] = {
+    **E2E_PROFILES["lora_generalization"],
+    "lora_repair_percentages": E2E_LORA_REPAIR_PERCENTAGES,
+}
+E2E_PROFILES["lora_repair_sweep_pilot"] = {
+    **E2E_PROFILES["lora_generalization_pilot"],
+    "lora_repair_percentages": E2E_LORA_REPAIR_PERCENTAGES,
+}
