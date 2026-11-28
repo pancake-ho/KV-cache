@@ -1,0 +1,289 @@
+diff --git a/proposed/communication/benchmark.py b/proposed/communication/benchmark.py
+index 1070cb3..8aba0c8 100644
+--- a/proposed/communication/benchmark.py
++++ b/proposed/communication/benchmark.py
+@@ -82,7 +82,7 @@ def run(args, link, file):
+     from ..validation.lora_transfer.replay import assign_adapters
+     from ..validation.semcache_smoke import TINYBERT_REVISION
+     from ..validation.serving_e2e import add_quality, models_and_prompts
+-    from .cache_path import NetworkPrefixCache, NetworkRaReCache
++    from .cache_path import NetworkNativePrefixCache, NetworkPrefixCache, NetworkRaReCache
+ 
+     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+         raise RuntimeError("Expose exactly one CUDA GPU")
+@@ -149,17 +149,23 @@ def run(args, link, file):
+     )
+     full = ServingEngine(runtime, collect_prefill_metrics=args.profile_stages)
+ 
+-    def prepare(event, *, miss=False):
+-        cache = NetworkPrefixCache(
+-            SemanticIndex(encoder, clusters=1), case["cache_mib"] << 20, link, pair[0],
+-            args.source_placement,
+-        )
+-        engine = ServingEngine(
+-            runtime, cache=cache, transfer=transfer, collect_prefill_metrics=args.profile_stages,
+-        )
++    def prepare(event, *, miss=False, native=False):
++        index = SemanticIndex(encoder, clusters=1)
++        capacity_bytes = case["cache_mib"] << 20
+         source = producers[event.prefix_request_id].request
++        if native:
++            source = replace(source, model_id=event.request.model_id, adapter_id=event.request.adapter_id)
++            cache = NetworkNativePrefixCache(
++                index, capacity_bytes, link, source, codec, profile_stages=args.profile_stages,
++            )
++        else:
++            cache = NetworkPrefixCache(index, capacity_bytes, link, pair[0], args.source_placement)
+         if miss:
+             source = replace(source, share_group=f"{source.share_group}:miss")
++        engine = ServingEngine(
++            runtime, cache=cache, transfer=None if native else transfer,
++            collect_prefill_metrics=args.profile_stages,
++        )
+         row = engine.serve(source, 1)
+         if source.request_id not in cache.entries:
+             raise RuntimeError("ES index has no eligible source prefix")
+@@ -175,6 +181,8 @@ def run(args, link, file):
+             raise RuntimeError(
+                 f"{event.request.request_id}: expected {expected_path}, got {row['path']}"
+             )
++        if expected_path == "native_kv_hit":
++            event = replace(event, kind="same")
+         route_check(event, row, "full" if expected_path == "full_recompute" else "rarecache")
+         if expected_path != "full_recompute":
+             row.update(engine.cache.query_metrics)
+@@ -192,11 +200,19 @@ def run(args, link, file):
+             reused = measure(engine, event, args.new_tokens, expected_path=expected_path)
+         return baseline, reused
+ 
++    def measure_native(event, budget):
++        engine, setup = prepare(event, native=True)
++        row = measure(engine, event, budget, expected_path="native_kv_hit")
++        return {"native": row, "native_setup": setup}
++
+     write_row(file, {"kind": "settings", "network": link.metadata, "serving": settings,
+                       "args": vars(args), "gpu": torch.cuda.get_device_name(device),
+                       "netem_before": read_qdiscs(Path(args.out).parent, "before"),
+                       "torch": str(torch.__version__), "cuda": torch.version.cuda,
+                       "transformers": transformers.__version__, "dtype": "bfloat16",
++                      **({"native_control_scope": "Target computes and uploads exact prefix KV "
++                          "before TTFT; download uses bitpack5; engine copies received KV"}
++                         if args.native_control else {}),
+                       "measurement_scope": "one GPU and two resident models; serial requests; "
+                       "source generation outside target TTFT; TCP connection already open; "
+                       "GPU memory includes the same resident source/mapper in both paths; "
+@@ -212,6 +228,8 @@ def run(args, link, file):
+             measure(full, warmup, warmup_tokens, expected_path="full_recompute")
+             measure(engine, warmup, warmup_tokens, expected_path="cross_model_kv_hit")
+             del engine
++            if args.native_control:
++                measure_native(warmup, warmup_tokens)
+             if args.measure_cache_miss:
+                 engine, _ = prepare(warmup, miss=True)
+                 measure(engine, warmup, warmup_tokens, expected_path="miss_recompute")
+@@ -222,6 +240,8 @@ def run(args, link, file):
+             trials = []
+             for replay in range(args.repeats):
+                 reuse_first = bool((idx + replay) % 2)
++                if args.native_control and reuse_first:
++                    native_trial = measure_native(event, args.new_tokens)
+                 engine, setup = prepare(event)
+                 baseline, reuse = measure_pair(
+                     engine, event, "cross_model_kv_hit", reuse_first=reuse_first,
+@@ -239,6 +259,10 @@ def run(args, link, file):
+                     headroom_without_download_tcp_ms=trial["saved_ms"] + download["tcp_ms"],
+                     headroom_without_download_total_ms=trial["saved_ms"] + download["total_ms"],
+                 )
++                if args.native_control:
++                    if not reuse_first:
++                        native_trial = measure_native(event, args.new_tokens)
++                    trial.update(native_trial)
+                 if args.measure_cache_miss:
+                     engine, _ = prepare(event, miss=True)
+                     miss_full, miss = measure_pair(
+@@ -283,6 +307,7 @@ def main():
+     parser.add_argument("--measure-cache-miss", action="store_true")
+     parser.add_argument("--profile-stages", action="store_true")
+     parser.add_argument("--warmup-each-question", action="store_true")
++    parser.add_argument("--native-control", action="store_true")
+     args = parser.parse_args()
+     if not 1 <= args.port <= 65535 or not 0 < args.socket_timeout < float("inf"):
+         parser.error("Invalid port or socket timeout")
+@@ -292,6 +317,10 @@ def main():
+     if (not args.out or not 0 <= args.repair <= 1 or not 1 <= args.smoke_mib <= 128
+             or min(args.samples, args.repeats, args.new_tokens) < 1):
+         parser.error("Specify --out and valid repair, sample, replay and token settings")
++    if args.native_control and (args.role, args.source_placement, args.wire_codec) != (
++        "bench", "es", "bitpack5"
++    ):
++        parser.error("--native-control requires bench, --source-placement es and --wire-codec bitpack5")
+ 
+     with Path(args.out).open("x", encoding="utf-8") as file:
+         with connect_ud(args.es_ip, args.ud_ip, args.port, args.rendezvous,
+diff --git a/proposed/communication/cache_path.py b/proposed/communication/cache_path.py
+index ef2f0b6..30553ac 100644
+--- a/proposed/communication/cache_path.py
++++ b/proposed/communication/cache_path.py
+@@ -1,5 +1,6 @@
+ """Carry real prefix K/V and repair positions over the benchmark TCP link."""
+ 
++from dataclasses import replace
+ from time import perf_counter
+ 
+ import torch
+@@ -40,8 +41,11 @@ class NetworkPrefixCache(PrefixCache):
+         self.setup_upload = None
+         self.query_metrics = {}
+ 
++    def _is_source(self, request):
++        return request.model_id == self.source_model
++
+     def lookup(self, request, *, adapter_sha256=None, transfer=None):
+-        is_target = request.model_id != self.source_model
++        is_target = not self._is_source(request)
+         if is_target:
+             self.query_metrics = {}
+             packet = encode_request(request)
+@@ -63,11 +67,35 @@ class NetworkPrefixCache(PrefixCache):
+         return result
+ 
+     def snapshot(self, request, layers, adapter_sha256=None, *, metrics=None):
+-        if request.model_id == self.source_model and self.source_placement == "es":
++        if self._is_source(request) and self.source_placement == "es":
+             layers, _, self.setup_upload = move_kv(self.link, layers, from_ud=True)
+         return super().snapshot(request, layers, adapter_sha256, metrics=metrics)
+ 
+ 
++class NetworkNativePrefixCache(NetworkPrefixCache):
++    """Use Target-generated KV to measure the compressed same-model path."""
++
++    def __init__(self, index, capacity_bytes, link, source_request, codec, *, profile_stages=False):
++        super().__init__(index, capacity_bytes, link, source_request.model_id, "es")
++        self.source_request_id = source_request.request_id
++        self.wire_codec = codec
++        self.profile_stages = profile_stages
++
++    def _is_source(self, request):
++        return request.request_id == self.source_request_id
++
++    def lookup(self, request, *, adapter_sha256=None, transfer=None):
++        result = super().lookup(request, adapter_sha256=adapter_sha256, transfer=transfer)
++        if result.entry is None:
++            return result
++        layers, _, metrics = move_kv(
++            self.link, result.entry.layers, from_ud=False, codec=self.wire_codec,
++            profile_stages=self.profile_stages,
++        )
++        self.query_metrics["target_download"] = metrics
++        return replace(result, entry=replace(result.entry, layers=layers))
++
++
+ class NetworkRaReCache:
+     """Reuse the existing route guard and repair on the received target KV."""
+ 
+diff --git a/proposed/communication/launcher.py b/proposed/communication/launcher.py
+index 83fa325..d56fe9f 100644
+--- a/proposed/communication/launcher.py
++++ b/proposed/communication/launcher.py
+@@ -17,7 +17,7 @@ def namespace_command(namespace, module, *args):
+     ]
+ 
+ 
+-def benchmark_args(*, profile_stages=False, warmup_each_question=False):
++def benchmark_args(*, profile_stages=False, warmup_each_question=False, native_control=False):
+     if config.MODE == "smoke":
+         return ["--smoke-mib", config.SMOKE_MIB]
+ 
+@@ -31,6 +31,7 @@ def benchmark_args(*, profile_stages=False, warmup_each_question=False):
+         *(["--measure-cache-miss"] if config.MEASURE_CACHE_MISS else []),
+         *(["--profile-stages"] if profile_stages else []),
+         *(["--warmup-each-question"] if warmup_each_question else []),
++        *(["--native-control"] if native_control else []),
+     ]
+ 
+ 
+@@ -45,7 +46,7 @@ def snapshot_network(output, phase):
+         subprocess.run(command, check=True)
+ 
+ 
+-def main(*, profile_stages=False, warmup_each_question=False):
++def main(*, profile_stages=False, warmup_each_question=False, native_control=False):
+     if config.MODE not in {"smoke", "bench"}:
+         raise SystemExit("Set MODE to 'smoke' or 'bench' in proposed/communication/config.py")
+     if not all((config.ES_NAMESPACE, config.UD_NAMESPACE, config.ES_IP, config.UD_IP)):
+@@ -67,7 +68,8 @@ def main(*, profile_stages=False, warmup_each_question=False):
+         server_command = namespace_command(config.ES_NAMESPACE, "benchmark", "es", *common)
+         client_command = namespace_command(
+             config.UD_NAMESPACE, "benchmark", config.MODE, *common,
+-            *benchmark_args(profile_stages=profile_stages, warmup_each_question=warmup_each_question),
++            *benchmark_args(profile_stages=profile_stages, warmup_each_question=warmup_each_question,
++                            native_control=native_control),
+             "--out", output / "report.jsonl",
+         )
+         server = subprocess.Popen(server_command)
+diff --git a/proposed/communication/metrics/record.py b/proposed/communication/metrics/record.py
+index 01d531e..c0bde83 100644
+--- a/proposed/communication/metrics/record.py
++++ b/proposed/communication/metrics/record.py
+@@ -46,6 +46,20 @@ def summarize_trials(paired_by_question, repeats):
+         "full_em": mean(stat("full", "exact_match", mean)),
+         "reuse_em": mean(stat("reuse", "exact_match", mean)),
+     }
++    if "native" in paired_by_question[0][0]:
++        summary.update(
++            native_ttft_ms=distribution(stat("native", "ttft_ms", median)),
++            native_f1=mean(stat("native", "f1", mean)),
++            native_em=mean(stat("native", "exact_match", mean)),
++            native_full_token_match=sum(
++                trial["native"]["generated_ids"] == trial["full"]["generated_ids"]
++                for trials in paired_by_question for trial in trials
++            ),
++            reuse_full_token_match=sum(
++                trial["reuse"]["generated_ids"] == trial["full"]["generated_ids"]
++                for trials in paired_by_question for trial in trials
++            ),
++        )
+     for scope in ("download_tcp", "download_total"):
+         key = f"headroom_without_{scope}_ms"
+         if key in paired_by_question[0][0]:
+diff --git a/proposed/communication/private_network.py b/proposed/communication/private_network.py
+index b195abf..38cada8 100644
+--- a/proposed/communication/private_network.py
++++ b/proposed/communication/private_network.py
+@@ -11,8 +11,9 @@ def _run(*command):
+ 
+ 
+ def run():
+-    headroom = os.environ.get("KV_COMM_EXPERIMENT") == "headroom"
+-    rate_args = [] if headroom or config.NETEM_RATE is None else ["rate", config.NETEM_RATE]
++    experiment = os.environ.get("KV_COMM_EXPERIMENT")
++    uncapped = experiment in {"headroom", "native_control"}
++    rate_args = [] if uncapped or config.NETEM_RATE is None else ["rate", config.NETEM_RATE]
+     endpoints = (
+         (config.ES_NAMESPACE, "ves", config.ES_IP),
+         (config.UD_NAMESPACE, "vud", config.UD_IP),
+@@ -38,7 +39,7 @@ def run():
+             *rate_args,
+         )
+ 
+-    if not headroom:
++    if not uncapped:
+         launcher.main()
+         return
+ 
+@@ -50,8 +51,12 @@ def run():
+     config.MEASURE_CACHE_MISS = True
+     profile_stages = os.environ.get("KV_COMM_PROFILE_STAGES", "1") != "0"
+ 
+-    for repair in (0.30, 0.15, 0.10, 0.0):
++    native_control = experiment == "native_control"
++    repairs = (0.30,) if native_control else (0.30, 0.15, 0.10, 0.0)
++    label = "Native KV control" if native_control else "Repair sweep"
++    for repair in repairs:
+         config.REPAIR_FRACTION = repair
+-        print(f"Repair sweep: {repair:.2f}, netem delay={config.NETEM_DELAY}, no rate cap",
++        print(f"{label}: {repair:.2f}, netem delay={config.NETEM_DELAY}, no rate cap",
+               flush=True)
+-        launcher.main(profile_stages=profile_stages, warmup_each_question=True)
++        launcher.main(profile_stages=profile_stages, warmup_each_question=True,
++                      native_control=native_control)

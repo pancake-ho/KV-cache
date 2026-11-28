@@ -82,7 +82,7 @@ def run(args, link, file):
     from ..validation.lora_transfer.replay import assign_adapters
     from ..validation.semcache_smoke import TINYBERT_REVISION
     from ..validation.serving_e2e import add_quality, models_and_prompts
-    from .cache_path import NetworkPrefixCache, NetworkRaReCache
+    from .cache_path import NetworkNativePrefixCache, NetworkPrefixCache, NetworkRaReCache
 
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise RuntimeError("Expose exactly one CUDA GPU")
@@ -149,17 +149,23 @@ def run(args, link, file):
     )
     full = ServingEngine(runtime, collect_prefill_metrics=args.profile_stages)
 
-    def prepare(event, *, miss=False):
-        cache = NetworkPrefixCache(
-            SemanticIndex(encoder, clusters=1), case["cache_mib"] << 20, link, pair[0],
-            args.source_placement,
-        )
-        engine = ServingEngine(
-            runtime, cache=cache, transfer=transfer, collect_prefill_metrics=args.profile_stages,
-        )
+    def prepare(event, *, miss=False, native=False):
+        index = SemanticIndex(encoder, clusters=1)
+        capacity_bytes = case["cache_mib"] << 20
         source = producers[event.prefix_request_id].request
+        if native:
+            source = replace(source, model_id=event.request.model_id, adapter_id=event.request.adapter_id)
+            cache = NetworkNativePrefixCache(
+                index, capacity_bytes, link, source, codec, profile_stages=args.profile_stages,
+            )
+        else:
+            cache = NetworkPrefixCache(index, capacity_bytes, link, pair[0], args.source_placement)
         if miss:
             source = replace(source, share_group=f"{source.share_group}:miss")
+        engine = ServingEngine(
+            runtime, cache=cache, transfer=None if native else transfer,
+            collect_prefill_metrics=args.profile_stages,
+        )
         row = engine.serve(source, 1)
         if source.request_id not in cache.entries:
             raise RuntimeError("ES index has no eligible source prefix")
@@ -175,6 +181,8 @@ def run(args, link, file):
             raise RuntimeError(
                 f"{event.request.request_id}: expected {expected_path}, got {row['path']}"
             )
+        if expected_path == "native_kv_hit":
+            event = replace(event, kind="same")
         route_check(event, row, "full" if expected_path == "full_recompute" else "rarecache")
         if expected_path != "full_recompute":
             row.update(engine.cache.query_metrics)
@@ -192,11 +200,19 @@ def run(args, link, file):
             reused = measure(engine, event, args.new_tokens, expected_path=expected_path)
         return baseline, reused
 
+    def measure_native(event, budget):
+        engine, setup = prepare(event, native=True)
+        row = measure(engine, event, budget, expected_path="native_kv_hit")
+        return {"native": row, "native_setup": setup}
+
     write_row(file, {"kind": "settings", "network": link.metadata, "serving": settings,
                       "args": vars(args), "gpu": torch.cuda.get_device_name(device),
                       "netem_before": read_qdiscs(Path(args.out).parent, "before"),
                       "torch": str(torch.__version__), "cuda": torch.version.cuda,
                       "transformers": transformers.__version__, "dtype": "bfloat16",
+                      **({"native_control_scope": "Target computes and uploads exact prefix KV "
+                          "before TTFT; download uses bitpack5; engine copies received KV"}
+                         if args.native_control else {}),
                       "measurement_scope": "one GPU and two resident models; serial requests; "
                       "source generation outside target TTFT; TCP connection already open; "
                       "GPU memory includes the same resident source/mapper in both paths; "
@@ -212,6 +228,8 @@ def run(args, link, file):
             measure(full, warmup, warmup_tokens, expected_path="full_recompute")
             measure(engine, warmup, warmup_tokens, expected_path="cross_model_kv_hit")
             del engine
+            if args.native_control:
+                measure_native(warmup, warmup_tokens)
             if args.measure_cache_miss:
                 engine, _ = prepare(warmup, miss=True)
                 measure(engine, warmup, warmup_tokens, expected_path="miss_recompute")
@@ -222,6 +240,8 @@ def run(args, link, file):
             trials = []
             for replay in range(args.repeats):
                 reuse_first = bool((idx + replay) % 2)
+                if args.native_control and reuse_first:
+                    native_trial = measure_native(event, args.new_tokens)
                 engine, setup = prepare(event)
                 baseline, reuse = measure_pair(
                     engine, event, "cross_model_kv_hit", reuse_first=reuse_first,
@@ -239,6 +259,10 @@ def run(args, link, file):
                     headroom_without_download_tcp_ms=trial["saved_ms"] + download["tcp_ms"],
                     headroom_without_download_total_ms=trial["saved_ms"] + download["total_ms"],
                 )
+                if args.native_control:
+                    if not reuse_first:
+                        native_trial = measure_native(event, args.new_tokens)
+                    trial.update(native_trial)
                 if args.measure_cache_miss:
                     engine, _ = prepare(event, miss=True)
                     miss_full, miss = measure_pair(
@@ -283,6 +307,7 @@ def main():
     parser.add_argument("--measure-cache-miss", action="store_true")
     parser.add_argument("--profile-stages", action="store_true")
     parser.add_argument("--warmup-each-question", action="store_true")
+    parser.add_argument("--native-control", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535 or not 0 < args.socket_timeout < float("inf"):
         parser.error("Invalid port or socket timeout")
@@ -292,6 +317,10 @@ def main():
     if (not args.out or not 0 <= args.repair <= 1 or not 1 <= args.smoke_mib <= 128
             or min(args.samples, args.repeats, args.new_tokens) < 1):
         parser.error("Specify --out and valid repair, sample, replay and token settings")
+    if args.native_control and (args.role, args.source_placement, args.wire_codec) != (
+        "bench", "es", "bitpack5"
+    ):
+        parser.error("--native-control requires bench, --source-placement es and --wire-codec bitpack5")
 
     with Path(args.out).open("x", encoding="utf-8") as file:
         with connect_ud(args.es_ip, args.ud_ip, args.port, args.rendezvous,

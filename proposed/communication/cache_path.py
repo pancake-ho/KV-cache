@@ -1,5 +1,6 @@
 """Carry real prefix K/V and repair positions over the benchmark TCP link."""
 
+from dataclasses import replace
 from time import perf_counter
 
 import torch
@@ -40,8 +41,11 @@ class NetworkPrefixCache(PrefixCache):
         self.setup_upload = None
         self.query_metrics = {}
 
+    def _is_source(self, request):
+        return request.model_id == self.source_model
+
     def lookup(self, request, *, adapter_sha256=None, transfer=None):
-        is_target = request.model_id != self.source_model
+        is_target = not self._is_source(request)
         if is_target:
             self.query_metrics = {}
             packet = encode_request(request)
@@ -63,9 +67,33 @@ class NetworkPrefixCache(PrefixCache):
         return result
 
     def snapshot(self, request, layers, adapter_sha256=None, *, metrics=None):
-        if request.model_id == self.source_model and self.source_placement == "es":
+        if self._is_source(request) and self.source_placement == "es":
             layers, _, self.setup_upload = move_kv(self.link, layers, from_ud=True)
         return super().snapshot(request, layers, adapter_sha256, metrics=metrics)
+
+
+class NetworkNativePrefixCache(NetworkPrefixCache):
+    """Use Target-generated KV to measure the compressed same-model path."""
+
+    def __init__(self, index, capacity_bytes, link, source_request, codec, *, profile_stages=False):
+        super().__init__(index, capacity_bytes, link, source_request.model_id, "es")
+        self.source_request_id = source_request.request_id
+        self.wire_codec = codec
+        self.profile_stages = profile_stages
+
+    def _is_source(self, request):
+        return request.request_id == self.source_request_id
+
+    def lookup(self, request, *, adapter_sha256=None, transfer=None):
+        result = super().lookup(request, adapter_sha256=adapter_sha256, transfer=transfer)
+        if result.entry is None:
+            return result
+        layers, _, metrics = move_kv(
+            self.link, result.entry.layers, from_ud=False, codec=self.wire_codec,
+            profile_stages=self.profile_stages,
+        )
+        self.query_metrics["target_download"] = metrics
+        return replace(result, entry=replace(result.entry, layers=layers))
 
 
 class NetworkRaReCache:

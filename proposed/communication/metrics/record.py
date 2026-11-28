@@ -46,6 +46,20 @@ def summarize_trials(paired_by_question, repeats):
         "full_em": mean(stat("full", "exact_match", mean)),
         "reuse_em": mean(stat("reuse", "exact_match", mean)),
     }
+    if "native" in paired_by_question[0][0]:
+        summary.update(
+            native_ttft_ms=distribution(stat("native", "ttft_ms", median)),
+            native_f1=mean(stat("native", "f1", mean)),
+            native_em=mean(stat("native", "exact_match", mean)),
+            native_full_token_match=sum(
+                trial["native"]["generated_ids"] == trial["full"]["generated_ids"]
+                for trials in paired_by_question for trial in trials
+            ),
+            reuse_full_token_match=sum(
+                trial["reuse"]["generated_ids"] == trial["full"]["generated_ids"]
+                for trials in paired_by_question for trial in trials
+            ),
+        )
     for scope in ("download_tcp", "download_total"):
         key = f"headroom_without_{scope}_ms"
         if key in paired_by_question[0][0]:

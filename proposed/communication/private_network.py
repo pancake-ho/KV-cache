@@ -11,8 +11,9 @@ def _run(*command):
 
 
 def run():
-    headroom = os.environ.get("KV_COMM_EXPERIMENT") == "headroom"
-    rate_args = [] if headroom or config.NETEM_RATE is None else ["rate", config.NETEM_RATE]
+    experiment = os.environ.get("KV_COMM_EXPERIMENT")
+    uncapped = experiment in {"headroom", "native_control"}
+    rate_args = [] if uncapped or config.NETEM_RATE is None else ["rate", config.NETEM_RATE]
     endpoints = (
         (config.ES_NAMESPACE, "ves", config.ES_IP),
         (config.UD_NAMESPACE, "vud", config.UD_IP),
@@ -38,7 +39,7 @@ def run():
             *rate_args,
         )
 
-    if not headroom:
+    if not uncapped:
         launcher.main()
         return
 
@@ -50,8 +51,12 @@ def run():
     config.MEASURE_CACHE_MISS = True
     profile_stages = os.environ.get("KV_COMM_PROFILE_STAGES", "1") != "0"
 
-    for repair in (0.30, 0.15, 0.10, 0.0):
+    native_control = experiment == "native_control"
+    repairs = (0.30,) if native_control else (0.30, 0.15, 0.10, 0.0)
+    label = "Native KV control" if native_control else "Repair sweep"
+    for repair in repairs:
         config.REPAIR_FRACTION = repair
-        print(f"Repair sweep: {repair:.2f}, netem delay={config.NETEM_DELAY}, no rate cap",
+        print(f"{label}: {repair:.2f}, netem delay={config.NETEM_DELAY}, no rate cap",
               flush=True)
-        launcher.main(profile_stages=profile_stages, warmup_each_question=True)
+        launcher.main(profile_stages=profile_stages, warmup_each_question=True,
+                      native_control=native_control)
