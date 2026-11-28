@@ -40,21 +40,33 @@ class AffineKVMapper:
         self.repair_fraction = repair_fraction if method == "rarecache" else 0
 
     @torch.inference_mode()
+    def project_prefix(self, layers, *, source_model, target_model, collect_scores):
+        cache = DynamicCache.from_legacy_cache(layers)
+        return self.mapper.map(source_model, target_model, cache, collect_scores=collect_scores)
+
+    @torch.inference_mode()
     def map_prefix(self, layers, prefix_ids, *, source_model, target_model, stage_events=None,
-                   transfer_prefix=None):
+                   transfer_prefix=None, repair_fraction=None, first_tokens=0, last_tokens=0):
         if transfer_prefix is not None and (self.method != "rarecache" or stage_events is not None):
             raise ValueError("Prefix transfer requires separate RaReCache repair timing")
+        if repair_fraction is None:
+            repair_fraction = self.repair_fraction
+        elif self.method != "rarecache" or not 0 <= repair_fraction <= 1:
+            raise ValueError("Repair fraction override requires RaReCache and a fraction in [0, 1]")
         if stage_events is not None:
             stream = torch.cuda.current_stream(layers[0][0].device)
             start, projected, repaired = (torch.cuda.Event(enable_timing=True) for _ in range(3))
             start.record(stream)
-        cache = DynamicCache.from_legacy_cache(layers)
-        mapped, scores = self.mapper.map(source_model, target_model, cache,
-                                         collect_scores=bool(self.repair_fraction))
+        mapped, scores = self.project_prefix(
+            layers, source_model=source_model, target_model=target_model,
+            collect_scores=bool(repair_fraction),
+        )
         if stage_events is not None:
             projected.record(stream)
-        if self.repair_fraction:
-            positions = select_positions(scores, self.repair_fraction)
+        if repair_fraction:
+            positions = select_positions(
+                scores, repair_fraction, first_tokens=first_tokens, last_tokens=last_tokens,
+            )
             if transfer_prefix is not None:
                 mapped, positions = transfer_prefix(mapped, positions)
             prefix = torch.tensor([prefix_ids], dtype=torch.long, device=positions.device)

@@ -17,7 +17,8 @@ def namespace_command(namespace, module, *args):
     ]
 
 
-def benchmark_args(*, profile_stages=False, warmup_each_question=False, native_control=False):
+def benchmark_args(*, profile_stages=False, warmup_each_question=False, native_control=False,
+                   repair_selection_sweep=False):
     if config.MODE == "smoke":
         return ["--smoke-mib", config.SMOKE_MIB]
 
@@ -32,6 +33,7 @@ def benchmark_args(*, profile_stages=False, warmup_each_question=False, native_c
         *(["--profile-stages"] if profile_stages else []),
         *(["--warmup-each-question"] if warmup_each_question else []),
         *(["--native-control"] if native_control else []),
+        *(["--repair-selection-sweep"] if repair_selection_sweep else []),
     ]
 
 
@@ -46,7 +48,8 @@ def snapshot_network(output, phase):
         subprocess.run(command, check=True)
 
 
-def main(*, profile_stages=False, warmup_each_question=False, native_control=False):
+def main(*, profile_stages=False, warmup_each_question=False, native_control=False,
+         repair_selection_sweep=False):
     if config.MODE not in {"smoke", "bench"}:
         raise SystemExit("Set MODE to 'smoke' or 'bench' in proposed/communication/config.py")
     if not all((config.ES_NAMESPACE, config.UD_NAMESPACE, config.ES_IP, config.UD_IP)):
@@ -69,7 +72,8 @@ def main(*, profile_stages=False, warmup_each_question=False, native_control=Fal
         client_command = namespace_command(
             config.UD_NAMESPACE, "benchmark", config.MODE, *common,
             *benchmark_args(profile_stages=profile_stages, warmup_each_question=warmup_each_question,
-                            native_control=native_control),
+                            native_control=native_control,
+                            repair_selection_sweep=repair_selection_sweep),
             "--out", output / "report.jsonl",
         )
         server = subprocess.Popen(server_command)

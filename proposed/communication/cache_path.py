@@ -99,13 +99,16 @@ class NetworkNativePrefixCache(NetworkPrefixCache):
 class NetworkRaReCache:
     """Reuse the existing route guard and repair on the received target KV."""
 
-    def __init__(self, guard, mapper, link, codec, source_placement, *, profile_stages=False):
+    def __init__(self, guard, mapper, link, codec, source_placement, *, profile_stages=False,
+                 repair=None):
         self.guard = guard
         self.mapper = mapper
         self.link = link
         self.codec = codec
         self.source_placement = source_placement
         self.profile_stages = profile_stages
+        self.repair = repair or {}
+        self.selected_positions = ()
         self.metrics = {}
 
     def supports(self, source, target):
@@ -127,6 +130,7 @@ class NetworkRaReCache:
         def deliver(mapped, positions):
             positions_on_wire = positions.tolist()
             self.metrics["mapping_and_selection_ms"] = elapsed_ms(started)
+            self.selected_positions = positions_on_wire
             received, received_positions, self.metrics["target_download"] = move_kv(
                 self.link, mapped.to_legacy_cache(), from_ud=False,
                 codec=self.codec, positions=positions_on_wire, profile_stages=self.profile_stages,
@@ -139,7 +143,7 @@ class NetworkRaReCache:
 
         result = self.mapper.map_prefix(
             layers, source.token_ids, source_model=source_model, target_model=target_model,
-            transfer_prefix=deliver,
+            transfer_prefix=deliver, **self.repair,
         )
         torch.cuda.synchronize(device)
         self.metrics["transfer_mapping_repair_ms"] = elapsed_ms(started)

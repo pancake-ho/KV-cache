@@ -10,6 +10,9 @@ import sys
 from .link import connect_ud
 from .metrics.netem import read_qdiscs
 from .metrics.record import measure_request, summarize_trials, write_row
+from .repair_sweep import (
+    VARIANTS, cross_measurement, measurement_order, selection_metrics, summarize_alternatives,
+)
 from .rx.transport import accept_es
 
 
@@ -147,9 +150,16 @@ def run(args, link, file):
     transfer = NetworkRaReCache(
         guard, mapper, link, codec, args.source_placement, profile_stages=args.profile_stages,
     )
+    sweep_transfers = {
+        name: NetworkRaReCache(
+            guard, mapper, link, codec, args.source_placement,
+            profile_stages=args.profile_stages, repair=options,
+        )
+        for name, options in VARIANTS.items()
+    } if args.repair_selection_sweep else {}
     full = ServingEngine(runtime, collect_prefill_metrics=args.profile_stages)
 
-    def prepare(event, *, miss=False, native=False):
+    def prepare(event, *, miss=False, native=False, active_transfer=transfer):
         index = SemanticIndex(encoder, clusters=1)
         capacity_bytes = case["cache_mib"] << 20
         source = producers[event.prefix_request_id].request
@@ -163,7 +173,7 @@ def run(args, link, file):
         if miss:
             source = replace(source, share_group=f"{source.share_group}:miss")
         engine = ServingEngine(
-            runtime, cache=cache, transfer=None if native else transfer,
+            runtime, cache=cache, transfer=None if native else active_transfer,
             collect_prefill_metrics=args.profile_stages,
         )
         row = engine.serve(source, 1)
@@ -187,7 +197,7 @@ def run(args, link, file):
         if expected_path != "full_recompute":
             row.update(engine.cache.query_metrics)
         if expected_path == "cross_model_kv_hit":
-            row.update(transfer.metrics)
+            row.update(engine.transfer.metrics)
         add_quality([row], [event], tokenizer, eos)
         return row
 
@@ -205,14 +215,42 @@ def run(args, link, file):
         row = measure(engine, event, budget, expected_path="native_kv_hit")
         return {"native": row, "native_setup": setup}
 
+    def measure_variant(event, budget, name):
+        variant = sweep_transfers[name]
+        engine, setup = prepare(event, active_transfer=variant)
+        row = measure(engine, event, budget, expected_path="cross_model_kv_hit")
+        row["repair_selection"] = selection_metrics(
+            variant.selected_positions, row["reused_prefix_tokens"], VARIANTS[name],
+        )
+        return row, setup
+
+    def measure_sweep(event, order):
+        cross_rows = {}
+        for arm in order:
+            if arm == "full":
+                baseline = measure(full, event, args.new_tokens, expected_path="full_recompute")
+            elif arm == "native":
+                native_trial = measure_native(event, args.new_tokens)
+            else:
+                cross_rows[arm] = measure_variant(event, args.new_tokens, arm)
+        measurements = {name: cross_measurement(baseline, *cross_rows[name]) for name in VARIANTS}
+        rank30 = measurements.pop("rank30")
+        return {
+            "full": baseline, **native_trial, **rank30,
+            "repair_alternatives": measurements, "measurement_order": order,
+        }
+
     write_row(file, {"kind": "settings", "network": link.metadata, "serving": settings,
                       "args": vars(args), "gpu": torch.cuda.get_device_name(device),
+                      "eos_token_ids": sorted(token for token in eos if token is not None),
                       "netem_before": read_qdiscs(Path(args.out).parent, "before"),
                       "torch": str(torch.__version__), "cuda": torch.version.cuda,
                       "transformers": transformers.__version__, "dtype": "bfloat16",
                       **({"native_control_scope": "Target computes and uploads exact prefix KV "
                           "before TTFT; download uses bitpack5; engine copies received KV"}
                          if args.native_control else {}),
+                      **({"repair_variants": VARIANTS, "kv_diagnostics": "kv_diagnostics.jsonl"}
+                         if sweep_transfers else {}),
                       "measurement_scope": "one GPU and two resident models; serial requests; "
                       "source generation outside target TTFT; TCP connection already open; "
                       "GPU memory includes the same resident source/mapper in both paths; "
@@ -224,10 +262,15 @@ def run(args, link, file):
         )
         warmup_tokens = min(args.new_tokens, 2)
         for warmup in warmups:
-            engine, _ = prepare(warmup)
-            measure(full, warmup, warmup_tokens, expected_path="full_recompute")
-            measure(engine, warmup, warmup_tokens, expected_path="cross_model_kv_hit")
-            del engine
+            if sweep_transfers:
+                measure(full, warmup, warmup_tokens, expected_path="full_recompute")
+                for name in VARIANTS:
+                    measure_variant(warmup, warmup_tokens, name)
+            else:
+                engine, _ = prepare(warmup)
+                measure(full, warmup, warmup_tokens, expected_path="full_recompute")
+                measure(engine, warmup, warmup_tokens, expected_path="cross_model_kv_hit")
+                del engine
             if args.native_control:
                 measure_native(warmup, warmup_tokens)
             if args.measure_cache_miss:
@@ -240,29 +283,27 @@ def run(args, link, file):
             trials = []
             for replay in range(args.repeats):
                 reuse_first = bool((idx + replay) % 2)
-                if args.native_control and reuse_first:
-                    native_trial = measure_native(event, args.new_tokens)
-                engine, setup = prepare(event)
-                baseline, reuse = measure_pair(
-                    engine, event, "cross_model_kv_hit", reuse_first=reuse_first,
-                )
-                del engine
                 trial = {
                     "kind": "trial", "replay": replay, "request_id": event.request.request_id,
                     "prompt_tokens": len(event.request.token_ids),
                     "source_prefix_tokens": len(producers[event.prefix_request_id].request.token_ids),
-                    "source_setup": setup, "full": baseline, "reuse": reuse,
-                    "saved_ms": baseline["ttft_ms"] - reuse["ttft_ms"],
                 }
-                download = reuse["target_download"]
-                trial.update(
-                    headroom_without_download_tcp_ms=trial["saved_ms"] + download["tcp_ms"],
-                    headroom_without_download_total_ms=trial["saved_ms"] + download["total_ms"],
-                )
-                if args.native_control:
-                    if not reuse_first:
+                if sweep_transfers:
+                    order = measurement_order(idx * args.repeats + replay)
+                    trial.update(measure_sweep(event, order))
+                else:
+                    if args.native_control and reuse_first:
                         native_trial = measure_native(event, args.new_tokens)
-                    trial.update(native_trial)
+                    engine, setup = prepare(event)
+                    baseline, reuse = measure_pair(
+                        engine, event, "cross_model_kv_hit", reuse_first=reuse_first,
+                    )
+                    del engine
+                    trial.update(full=baseline, **cross_measurement(baseline, reuse, setup))
+                    if args.native_control:
+                        if not reuse_first:
+                            native_trial = measure_native(event, args.new_tokens)
+                        trial.update(native_trial)
                 if args.measure_cache_miss:
                     engine, _ = prepare(event, miss=True)
                     miss_full, miss = measure_pair(
@@ -280,8 +321,15 @@ def run(args, link, file):
             paired_by_question.append(trials)
 
     summary = summarize_trials(paired_by_question, args.repeats)
+    if sweep_transfers:
+        summary["repair_alternatives"] = summarize_alternatives(paired_by_question, args.repeats)
     write_row(file, summary)
     print(json.dumps(summary), flush=True)
+    if sweep_transfers:
+        from .metrics.kv_error import write_diagnostics
+
+        write_diagnostics(Path(args.out).with_name("kv_diagnostics.jsonl"),
+                          runtime, mapper, codec, producers, targets)
 
 
 def main():
@@ -308,6 +356,7 @@ def main():
     parser.add_argument("--profile-stages", action="store_true")
     parser.add_argument("--warmup-each-question", action="store_true")
     parser.add_argument("--native-control", action="store_true")
+    parser.add_argument("--repair-selection-sweep", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535 or not 0 < args.socket_timeout < float("inf"):
         parser.error("Invalid port or socket timeout")
@@ -321,6 +370,8 @@ def main():
         "bench", "es", "bitpack5"
     ):
         parser.error("--native-control requires bench, --source-placement es and --wire-codec bitpack5")
+    if args.repair_selection_sweep and (not args.native_control or args.repair != 0.30):
+        parser.error("--repair-selection-sweep requires --native-control and --repair 0.30")
 
     with Path(args.out).open("x", encoding="utf-8") as file:
         with connect_ud(args.es_ip, args.ud_ip, args.port, args.rendezvous,
