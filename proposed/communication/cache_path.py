@@ -38,17 +38,25 @@ class NetworkPrefixCache(PrefixCache):
         self.query_metrics = {}
 
     def lookup(self, request, *, adapter_sha256=None, transfer=None):
-        if request.model_id != self.source_model:
+        is_target = request.model_id != self.source_model
+        if is_target:
             self.query_metrics = {}
             packet = encode_request(request)
             (received,), self.query_metrics["lookup_uplink"] = self.link.exchange(
                 [packet], from_ud=True,
             )
             request = decode_request(received, type(request))
+
         started = perf_counter()
         result = super().lookup(request, adapter_sha256=adapter_sha256, transfer=transfer)
-        if request.model_id != self.source_model:
+        if is_target:
             self.query_metrics["lookup_ms"] = elapsed_ms(started)
+            if result.entry is None:
+                (reply,), self.query_metrics["miss_downlink"] = self.link.exchange(
+                    [b"miss"], from_ud=False,
+                )
+                if reply != b"miss":
+                    raise RuntimeError("Invalid ES cache-miss response")
         return result
 
     def snapshot(self, request, layers, adapter_sha256=None, *, metrics=None):

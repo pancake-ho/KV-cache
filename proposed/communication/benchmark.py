@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from dataclasses import replace
 import sys
 
 from .link import connect_ud
@@ -132,28 +133,46 @@ def run(args, link, file):
     transfer = NetworkRaReCache(guard, mapper, link, codec, args.source_placement)
     full = ServingEngine(runtime)
 
-    def prepare(event):
+    def prepare(event, *, miss=False):
         cache = NetworkPrefixCache(
             SemanticIndex(encoder, clusters=1), case["cache_mib"] << 20, link, pair[0],
             args.source_placement,
         )
         engine = ServingEngine(runtime, cache=cache, transfer=transfer)
-        source = producers[event.prefix_request_id]
-        row = engine.serve(source.request, 1)
-        if source.request.request_id not in cache.entries:
+        source = producers[event.prefix_request_id].request
+        if miss:
+            source = replace(source, share_group=f"{source.share_group}:miss")
+        row = engine.serve(source, 1)
+        if source.request_id not in cache.entries:
             raise RuntimeError("ES index has no eligible source prefix")
-        return engine, {"source_application_ms": row["application_ms"],
-                        "source_prefill_ms": row["prefill_ms"], "setup_upload": cache.setup_upload}
+        return engine, {
+            "source_application_ms": row["application_ms"],
+            "source_prefill_ms": row["prefill_ms"],
+            "setup_upload": cache.setup_upload,
+        }
 
-    def measure(engine, event, budget, *, reuse):
+    def measure(engine, event, budget, *, expected_path):
         row = measure_request(engine, event.request, budget, device)
-        route_check(event, row, "rarecache" if reuse else "full")
-        if reuse and row["path"] != "cross_model_kv_hit":
-            raise RuntimeError(f"Expected cross-model HIT for {event.request.request_id}")
-        if reuse:
-            row.update(engine.cache.query_metrics, **transfer.metrics)
+        if row["path"] != expected_path:
+            raise RuntimeError(
+                f"{event.request.request_id}: expected {expected_path}, got {row['path']}"
+            )
+        route_check(event, row, "full" if expected_path == "full_recompute" else "rarecache")
+        if expected_path != "full_recompute":
+            row.update(engine.cache.query_metrics)
+        if expected_path == "cross_model_kv_hit":
+            row.update(transfer.metrics)
         add_quality([row], [event], tokenizer, eos)
         return row
+
+    def measure_pair(engine, event, expected_path, *, reuse_first):
+        if reuse_first:
+            reused = measure(engine, event, args.new_tokens, expected_path=expected_path)
+            baseline = measure(full, event, args.new_tokens, expected_path="full_recompute")
+        else:
+            baseline = measure(full, event, args.new_tokens, expected_path="full_recompute")
+            reused = measure(engine, event, args.new_tokens, expected_path=expected_path)
+        return baseline, reused
 
     write_row(file, {"kind": "settings", "network": link.metadata, "serving": settings,
                       "args": vars(args), "gpu": torch.cuda.get_device_name(device),
@@ -166,25 +185,43 @@ def run(args, link, file):
 
     with torch.inference_mode():
         warmup = max(targets, key=lambda event: len(event.request.token_ids))
+        warmup_tokens = min(args.new_tokens, 2)
         engine, _ = prepare(warmup)
-        measure(full, warmup, min(args.new_tokens, 2), reuse=False)
-        measure(engine, warmup, min(args.new_tokens, 2), reuse=True)
+        measure(full, warmup, warmup_tokens, expected_path="full_recompute")
+        measure(engine, warmup, warmup_tokens, expected_path="cross_model_kv_hit")
         del engine
+        if args.measure_cache_miss:
+            engine, _ = prepare(warmup, miss=True)
+            measure(engine, warmup, warmup_tokens, expected_path="miss_recompute")
+            del engine
+
         paired_by_question = []
         for idx, event in enumerate(targets):
             trials = []
             for replay in range(args.repeats):
+                reuse_first = bool((idx + replay) % 2)
                 engine, setup = prepare(event)
-                if (idx + replay) % 2:
-                    reuse = measure(engine, event, args.new_tokens, reuse=True)
-                    baseline = measure(full, event, args.new_tokens, reuse=False)
-                else:
-                    baseline = measure(full, event, args.new_tokens, reuse=False)
-                    reuse = measure(engine, event, args.new_tokens, reuse=True)
+                baseline, reuse = measure_pair(
+                    engine, event, "cross_model_kv_hit", reuse_first=reuse_first,
+                )
                 del engine
-                trial = {"kind": "trial", "replay": replay, "request_id": event.request.request_id,
-                         "source_setup": setup, "full": baseline, "reuse": reuse,
-                         "saved_ms": baseline["ttft_ms"] - reuse["ttft_ms"]}
+                trial = {
+                    "kind": "trial", "replay": replay, "request_id": event.request.request_id,
+                    "prompt_tokens": len(event.request.token_ids),
+                    "source_prefix_tokens": len(producers[event.prefix_request_id].request.token_ids),
+                    "source_setup": setup, "full": baseline, "reuse": reuse,
+                    "saved_ms": baseline["ttft_ms"] - reuse["ttft_ms"],
+                }
+                if args.measure_cache_miss:
+                    engine, _ = prepare(event, miss=True)
+                    miss_full, miss = measure_pair(
+                        engine, event, "miss_recompute", reuse_first=not reuse_first,
+                    )
+                    del engine
+                    trial.update(
+                        miss=miss, miss_full_ttft_ms=miss_full["ttft_ms"],
+                        miss_extra_ms=miss["ttft_ms"] - miss_full["ttft_ms"],
+                    )
                 write_row(file, trial)
                 print(f"{event.request.request_id}, replay {replay}: {trial['saved_ms']:+.1f} ms",
                       flush=True)
@@ -216,6 +253,7 @@ def main():
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--new-tokens", type=int, default=8)
     parser.add_argument("--out")
+    parser.add_argument("--measure-cache-miss", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535 or not 0 < args.socket_timeout < float("inf"):
         parser.error("Invalid port or socket timeout")

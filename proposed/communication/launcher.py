@@ -27,6 +27,7 @@ def benchmark_args():
         "--repeats", config.REPEATS, "--new-tokens", config.NEW_TOKENS,
         *(["--qa-report", config.QA_REPORT] if config.QA_REPORT else []),
         *(["--lora-route", config.LORA_ROUTE] if config.LORA_ROUTE else []),
+        *(["--measure-cache-miss"] if config.MEASURE_CACHE_MISS else []),
     ]
 
 

@@ -36,7 +36,8 @@ def summarize_trials(paired_by_question, repeats):
         return [aggregate(trial[side][metric] for trial in trials) for trials in paired_by_question]
 
     saved = [median(trial["saved_ms"] for trial in trials) for trials in paired_by_question]
-    return {
+
+    summary = {
         "kind": "summary", "questions": len(saved), "repeats": repeats,
         "median_paired_saved_ms": median(saved), "faster_questions": sum(value > 0 for value in saved),
         "full_ttft_ms": distribution(stat("full", "ttft_ms", median)),
@@ -45,3 +46,20 @@ def summarize_trials(paired_by_question, repeats):
         "full_em": mean(stat("full", "exact_match", mean)),
         "reuse_em": mean(stat("reuse", "exact_match", mean)),
     }
+    if "miss_extra_ms" in paired_by_question[0][0]:
+        hit_saved = mean(
+            mean(trial["saved_ms"] for trial in trials) for trials in paired_by_question
+        )
+        miss_extra = mean(
+            mean(trial["miss_extra_ms"] for trial in trials) for trials in paired_by_question
+        )
+        summary.update(
+            miss_ttft_ms=distribution(stat("miss", "ttft_ms", median)),
+            mean_hit_saved_ms=hit_saved,
+            mean_miss_extra_ms=miss_extra,
+            break_even_hit_rate=(
+                miss_extra / (hit_saved + miss_extra)
+                if hit_saved > 0 and miss_extra >= 0 else None
+            ),
+        )
+    return summary
