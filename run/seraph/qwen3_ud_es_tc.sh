@@ -18,4 +18,5 @@ source "$conda_base/etc/profile.d/conda.sh"
 conda activate lab
 set -u
 
-exec python -u -m proposed.communication.launcher
+exec unshare --user --map-root-user --mount --net --propagation private \
+    python -u -c 'from proposed.communication.private_network import run; run()'
