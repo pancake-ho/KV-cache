@@ -37,18 +37,32 @@ def encode_request(request):
     return json.dumps(asdict(request)).encode()
 
 
-def encode_kv(layers, codec, positions):
+def encode_kv(layers, codec, positions, *, timings=None):
     import torch
 
+    started = perf_counter()
     packed = codec.encode(layers) if codec else None
+    if timings is not None:
+        if codec:
+            torch.cuda.synchronize(layers[0][0].device)
+        timings["encode_ms"] = (perf_counter() - started) * 1000
     pairs = [(layer.payload, layer.scales) for layer in packed] if packed else layers
     tensors = [tensor for pair in pairs for tensor in pair]
-    chunks = [
-        tensor.detach().to("cpu").contiguous().view(torch.uint8).numpy()
-        for tensor in tensors
-    ]
+    if timings is None:
+        chunks = [
+            tensor.detach().to("cpu").contiguous().view(torch.uint8).numpy()
+            for tensor in tensors
+        ]
+    else:
+        started = perf_counter()
+        host = [tensor.detach().to("cpu") for tensor in tensors]
+        timings["dtoh_ms"] = (perf_counter() - started) * 1000
+        started = perf_counter()
+        chunks = [tensor.contiguous().view(torch.uint8).numpy() for tensor in host]
     if positions is not None:
         chunks.append(json.dumps(positions).encode())
     tensor_layout = [(t.shape, t.dtype, t.device) for t in tensors]
     packed_layout = [(type(layer), layer.shape, layer.dtype) for layer in packed or ()]
+    if timings is not None:
+        timings["serialize_ms"] = (perf_counter() - started) * 1000
     return chunks, tensor_layout, packed_layout

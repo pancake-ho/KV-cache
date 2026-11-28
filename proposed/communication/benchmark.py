@@ -8,6 +8,7 @@ from dataclasses import replace
 import sys
 
 from .link import connect_ud
+from .metrics.netem import read_qdiscs
 from .metrics.record import measure_request, summarize_trials, write_row
 from .rx.transport import accept_es
 
@@ -85,11 +86,24 @@ def run(args, link, file):
 
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise RuntimeError("Expose exactly one CUDA GPU")
+
     device = torch.device("cuda:0")
-    free, _ = torch.cuda.mem_get_info(device)
-    if (torch.cuda.get_device_capability(device)[0] < 8
-            or free / (1 << 30) < settings["minimum_free_gib"]):
-        raise RuntimeError(f"Need BF16 and {settings['minimum_free_gib']} GiB GPU memory free")
+    capability = torch.cuda.get_device_capability(device)
+    free, total = torch.cuda.mem_get_info(device)
+    free_gib = free / (1 << 30)
+    total_gib = total / (1 << 30)
+    required_gib = settings["minimum_free_gib"]
+
+    print(
+        f"GPU {torch.cuda.get_device_name(device)} | CC {capability[0]}.{capability[1]} | "
+        f"free VRAM {free_gib:.2f}/{total_gib:.2f} GiB",
+        flush=True,
+    )
+    if capability[0] < 8:
+        raise RuntimeError("GPU compute capability must be 8.0 or newer for BF16")
+    if free_gib < required_gib:
+        raise RuntimeError(f"Need {required_gib} GiB free VRAM, got {free_gib:.2f} GiB")
+
     torch.manual_seed(settings["seed"])
     torch.backends.cuda.matmul.allow_tf32 = False
 
@@ -130,15 +144,19 @@ def run(args, link, file):
         from ..src.cache.kv_bitpack import KVBitpackCodec
 
         codec = KVBitpackCodec()
-    transfer = NetworkRaReCache(guard, mapper, link, codec, args.source_placement)
-    full = ServingEngine(runtime)
+    transfer = NetworkRaReCache(
+        guard, mapper, link, codec, args.source_placement, profile_stages=args.profile_stages,
+    )
+    full = ServingEngine(runtime, collect_prefill_metrics=args.profile_stages)
 
     def prepare(event, *, miss=False):
         cache = NetworkPrefixCache(
             SemanticIndex(encoder, clusters=1), case["cache_mib"] << 20, link, pair[0],
             args.source_placement,
         )
-        engine = ServingEngine(runtime, cache=cache, transfer=transfer)
+        engine = ServingEngine(
+            runtime, cache=cache, transfer=transfer, collect_prefill_metrics=args.profile_stages,
+        )
         source = producers[event.prefix_request_id].request
         if miss:
             source = replace(source, share_group=f"{source.share_group}:miss")
@@ -176,6 +194,7 @@ def run(args, link, file):
 
     write_row(file, {"kind": "settings", "network": link.metadata, "serving": settings,
                       "args": vars(args), "gpu": torch.cuda.get_device_name(device),
+                      "netem_before": read_qdiscs(Path(args.out).parent, "before"),
                       "torch": str(torch.__version__), "cuda": torch.version.cuda,
                       "transformers": transformers.__version__, "dtype": "bfloat16",
                       "measurement_scope": "one GPU and two resident models; serial requests; "
@@ -184,16 +203,19 @@ def run(args, link, file):
                       "source and target UD are logical roles on a single UD link"})
 
     with torch.inference_mode():
-        warmup = max(targets, key=lambda event: len(event.request.token_ids))
+        warmups = targets if args.warmup_each_question else (
+            max(targets, key=lambda event: len(event.request.token_ids)),
+        )
         warmup_tokens = min(args.new_tokens, 2)
-        engine, _ = prepare(warmup)
-        measure(full, warmup, warmup_tokens, expected_path="full_recompute")
-        measure(engine, warmup, warmup_tokens, expected_path="cross_model_kv_hit")
-        del engine
-        if args.measure_cache_miss:
-            engine, _ = prepare(warmup, miss=True)
-            measure(engine, warmup, warmup_tokens, expected_path="miss_recompute")
+        for warmup in warmups:
+            engine, _ = prepare(warmup)
+            measure(full, warmup, warmup_tokens, expected_path="full_recompute")
+            measure(engine, warmup, warmup_tokens, expected_path="cross_model_kv_hit")
             del engine
+            if args.measure_cache_miss:
+                engine, _ = prepare(warmup, miss=True)
+                measure(engine, warmup, warmup_tokens, expected_path="miss_recompute")
+                del engine
 
         paired_by_question = []
         for idx, event in enumerate(targets):
@@ -212,6 +234,11 @@ def run(args, link, file):
                     "source_setup": setup, "full": baseline, "reuse": reuse,
                     "saved_ms": baseline["ttft_ms"] - reuse["ttft_ms"],
                 }
+                download = reuse["target_download"]
+                trial.update(
+                    headroom_without_download_tcp_ms=trial["saved_ms"] + download["tcp_ms"],
+                    headroom_without_download_total_ms=trial["saved_ms"] + download["total_ms"],
+                )
                 if args.measure_cache_miss:
                     engine, _ = prepare(event, miss=True)
                     miss_full, miss = measure_pair(
@@ -254,13 +281,15 @@ def main():
     parser.add_argument("--new-tokens", type=int, default=8)
     parser.add_argument("--out")
     parser.add_argument("--measure-cache-miss", action="store_true")
+    parser.add_argument("--profile-stages", action="store_true")
+    parser.add_argument("--warmup-each-question", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.port <= 65535 or not 0 < args.socket_timeout < float("inf"):
         parser.error("Invalid port or socket timeout")
     if args.role == "es":
         accept_es(args.es_ip, args.ud_ip, args.port, args.rendezvous)
         return
-    if (not args.out or not 0 < args.repair <= 1 or not 1 <= args.smoke_mib <= 128
+    if (not args.out or not 0 <= args.repair <= 1 or not 1 <= args.smoke_mib <= 128
             or min(args.samples, args.repeats, args.new_tokens) < 1):
         parser.error("Specify --out and valid repair, sample, replay and token settings")
 

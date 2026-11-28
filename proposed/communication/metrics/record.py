@@ -46,6 +46,14 @@ def summarize_trials(paired_by_question, repeats):
         "full_em": mean(stat("full", "exact_match", mean)),
         "reuse_em": mean(stat("reuse", "exact_match", mean)),
     }
+    for scope in ("download_tcp", "download_total"):
+        key = f"headroom_without_{scope}_ms"
+        if key in paired_by_question[0][0]:
+            margins = [median(trial[key] for trial in trials) for trials in paired_by_question]
+            summary[key] = {
+                "median_ms": median(margins),
+                "positive_questions": sum(value > 0 for value in margins),
+            }
     if "miss_extra_ms" in paired_by_question[0][0]:
         hit_saved = mean(
             mean(trial["saved_ms"] for trial in trials) for trials in paired_by_question

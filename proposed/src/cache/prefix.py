@@ -35,6 +35,8 @@ class Lookup:
     cluster_assignment_ms: float
     candidate_lookup_ms: float
     policy_observation_ms: float = 0.0
+    candidate_discover_ms: float = 0.0
+    candidate_validate_ms: float = 0.0
 
 
 def route_rejection(entry, request, adapter_sha256, transfer):
@@ -77,6 +79,7 @@ class PrefixCache:
         assignment = self.index.assign(request.text)
         start = perf_counter()
         candidates = self.index.discover(assignment["cluster_id"], request.token_ids)
+        discovered = perf_counter()
         rejected: dict[str, int] = {}
         hit = None
         for candidate in candidates:
@@ -94,9 +97,11 @@ class PrefixCache:
                     break
                 reason = "exact_prefix_mismatch"
             rejected[reason] = rejected.get(reason, 0) + 1
+        finished = perf_counter()
         return Lookup(hit, assignment["cluster_id"], len(candidates), rejected,
                       assignment["semantic_encoding_ms"], assignment["cluster_assignment_ms"],
-                      (perf_counter() - start) * 1000, observation_ms)
+                      (finished - start) * 1000, observation_ms,
+                      (discovered - start) * 1000, (finished - discovered) * 1000)
 
     def snapshot(self, request: Request, layers: Layers, adapter_sha256: str | None = None,
                  *, metrics=None) -> Entry | None:

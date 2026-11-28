@@ -31,8 +31,9 @@ class AffineKVMapper:
             raise ValueError("Expected the verified attention-weighted CacheBridge artifact")
         if method == "cachebridge_v2" and mapper.spec["variant"] != "layer-ordered-readout":
             raise ValueError("Expected the layer-ordered CacheBridge v2 artifact")
-        if not 0 < repair_fraction <= 1:
-            raise ValueError("repair_fraction must be in (0, 1]")
+        if not 0 <= repair_fraction <= 1:
+            raise ValueError("repair_fraction must be in [0, 1]")
+        self.method = method
         self.pair = tuple(identity.name for identity in identities)
         self.metadata = mapper.spec
         self.mapper = BF16RankMapper(mapper) if method == "rarecache" else mapper
@@ -41,7 +42,7 @@ class AffineKVMapper:
     @torch.inference_mode()
     def map_prefix(self, layers, prefix_ids, *, source_model, target_model, stage_events=None,
                    transfer_prefix=None):
-        if transfer_prefix is not None and (not self.repair_fraction or stage_events is not None):
+        if transfer_prefix is not None and (self.method != "rarecache" or stage_events is not None):
             raise ValueError("Prefix transfer requires separate RaReCache repair timing")
         if stage_events is not None:
             stream = torch.cuda.current_stream(layers[0][0].device)
@@ -58,6 +59,9 @@ class AffineKVMapper:
                 mapped, positions = transfer_prefix(mapped, positions)
             prefix = torch.tensor([prefix_ids], dtype=torch.long, device=positions.device)
             mapped = recompute(target_model, mapped, prefix, positions)
+        elif transfer_prefix is not None:
+            positions = torch.empty(0, dtype=torch.long, device=layers[0][0].device)
+            mapped, _ = transfer_prefix(mapped, positions)
         if stage_events is not None:
             repaired.record(stream)
             stage_events.update(projection_and_scoring=(start, projected),

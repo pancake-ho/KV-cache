@@ -2,6 +2,7 @@
 import json
 import os
 import socket
+from time import perf_counter
 
 from ..protocol import HEADER, NAMESPACE
 from ..tx.transport import send_handoff
@@ -60,18 +61,37 @@ def decode_request(packet, request_type):
     return request_type(**data)
 
 
-def decode_kv(received, tensor_layout, packed_layout, codec, has_positions):
+def decode_kv(received, tensor_layout, packed_layout, codec, has_positions, *, timings=None):
     import torch
 
-    restored = [
-        torch.frombuffer(data, dtype=dtype).reshape(shape).to(device)
-        for data, (shape, dtype, device) in zip(received[:len(tensor_layout)], tensor_layout, strict=True)
-    ]
+    frames = received[:len(tensor_layout)]
+    if timings is None:
+        restored = [
+            torch.frombuffer(data, dtype=dtype).reshape(shape).to(device)
+            for data, (shape, dtype, device) in zip(frames, tensor_layout, strict=True)
+        ]
+    else:
+        started = perf_counter()
+        host = [
+            torch.frombuffer(data, dtype=dtype).reshape(shape)
+            for data, (shape, dtype, _) in zip(frames, tensor_layout, strict=True)
+        ]
+        received_positions = json.loads(received[-1]) if has_positions else None
+        timings["deserialize_ms"] = (perf_counter() - started) * 1000
+        started = perf_counter()
+        restored = [tensor.to(device) for tensor, (_, _, device) in zip(host, tensor_layout, strict=True)]
+        timings["htod_ms"] = (perf_counter() - started) * 1000
     layers = tuple(zip(restored[::2], restored[1::2], strict=True))
+    started = perf_counter()
     if packed_layout:
         layers = codec.decode(tuple(
             layer_type(payload, scales, shape, dtype)
             for (layer_type, shape, dtype), (payload, scales) in zip(packed_layout, layers, strict=True)
         ))
-    received_positions = json.loads(received[-1]) if has_positions else None
+    if timings is None:
+        received_positions = json.loads(received[-1]) if has_positions else None
+    else:
+        if packed_layout:
+            torch.cuda.synchronize(layers[0][0].device)
+        timings["decode_ms"] = (perf_counter() - started) * 1000
     return layers, received_positions

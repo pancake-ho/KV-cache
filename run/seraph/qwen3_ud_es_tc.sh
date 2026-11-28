@@ -2,6 +2,7 @@
 #SBATCH --job-name=kv-comm
 #SBATCH --partition=batch_eebme_ugrad
 #SBATCH --nodes=1
+#SBATCH --nodelist=moana-y2
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=29G

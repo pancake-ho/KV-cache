@@ -12,17 +12,20 @@ from .tx.transport import encode_kv, encode_request
 
 
 @torch.inference_mode()
-def move_kv(link, layers, *, from_ud, codec=None, positions=None):
+def move_kv(link, layers, *, from_ud, codec=None, positions=None, profile_stages=False):
     """Round-trip the agreed cache layout without creating a combined tensor copy."""
     started = perf_counter()
-    chunks, tensor_layout, packed_layout = encode_kv(layers, codec, positions)
+    timings = {} if profile_stages else None
+    chunks, tensor_layout, packed_layout = encode_kv(layers, codec, positions, timings=timings)
     received, metrics = link.exchange(chunks, from_ud=from_ud)
     del chunks
     layers, received_positions = decode_kv(
-        received, tensor_layout, packed_layout, codec, positions is not None,
+        received, tensor_layout, packed_layout, codec, positions is not None, timings=timings,
     )
     torch.cuda.synchronize(layers[0][0].device)
     metrics["total_ms"] = elapsed_ms(started)
+    if timings is not None:
+        metrics["stages_ms"] = timings
     return layers, received_positions, metrics
 
 
@@ -68,12 +71,13 @@ class NetworkPrefixCache(PrefixCache):
 class NetworkRaReCache:
     """Reuse the existing route guard and repair on the received target KV."""
 
-    def __init__(self, guard, mapper, link, codec, source_placement):
+    def __init__(self, guard, mapper, link, codec, source_placement, *, profile_stages=False):
         self.guard = guard
         self.mapper = mapper
         self.link = link
         self.codec = codec
         self.source_placement = source_placement
+        self.profile_stages = profile_stages
         self.metrics = {}
 
     def supports(self, source, target):
@@ -97,7 +101,7 @@ class NetworkRaReCache:
             self.metrics["mapping_and_selection_ms"] = elapsed_ms(started)
             received, received_positions, self.metrics["target_download"] = move_kv(
                 self.link, mapped.to_legacy_cache(), from_ud=False,
-                codec=self.codec, positions=positions_on_wire,
+                codec=self.codec, positions=positions_on_wire, profile_stages=self.profile_stages,
             )
             if received_positions != positions_on_wire:
                 raise RuntimeError("Repair positions changed during TCP transfer")

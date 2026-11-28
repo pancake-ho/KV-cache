@@ -7,6 +7,7 @@ import sys
 from tempfile import TemporaryDirectory, mkdtemp
 
 from . import config
+from .metrics.netem import finalize_network_report
 
 
 def namespace_command(namespace, module, *args):
@@ -16,7 +17,7 @@ def namespace_command(namespace, module, *args):
     ]
 
 
-def benchmark_args():
+def benchmark_args(*, profile_stages=False, warmup_each_question=False):
     if config.MODE == "smoke":
         return ["--smoke-mib", config.SMOKE_MIB]
 
@@ -28,6 +29,8 @@ def benchmark_args():
         *(["--qa-report", config.QA_REPORT] if config.QA_REPORT else []),
         *(["--lora-route", config.LORA_ROUTE] if config.LORA_ROUTE else []),
         *(["--measure-cache-miss"] if config.MEASURE_CACHE_MISS else []),
+        *(["--profile-stages"] if profile_stages else []),
+        *(["--warmup-each-question"] if warmup_each_question else []),
     ]
 
 
@@ -42,7 +45,7 @@ def snapshot_network(output, phase):
         subprocess.run(command, check=True)
 
 
-def main():
+def main(*, profile_stages=False, warmup_each_question=False):
     if config.MODE not in {"smoke", "bench"}:
         raise SystemExit("Set MODE to 'smoke' or 'bench' in proposed/communication/config.py")
     if not all((config.ES_NAMESPACE, config.UD_NAMESPACE, config.ES_IP, config.UD_IP)):
@@ -63,7 +66,8 @@ def main():
         ]
         server_command = namespace_command(config.ES_NAMESPACE, "benchmark", "es", *common)
         client_command = namespace_command(
-            config.UD_NAMESPACE, "benchmark", config.MODE, *common, *benchmark_args(),
+            config.UD_NAMESPACE, "benchmark", config.MODE, *common,
+            *benchmark_args(profile_stages=profile_stages, warmup_each_question=warmup_each_question),
             "--out", output / "report.jsonl",
         )
         server = subprocess.Popen(server_command)
@@ -82,6 +86,8 @@ def main():
                     server.wait()
 
     snapshot_network(output, "after")
+    if config.MODE == "bench":
+        finalize_network_report(output)
 
 
 if __name__ == "__main__":
